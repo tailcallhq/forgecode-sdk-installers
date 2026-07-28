@@ -1,28 +1,19 @@
-# Swift Package Manager build output
-.build/
-.swiftpm/
-Package.resolved
+# Repository-wide ignores. Platform directories (macos/, windows/, linux/) add
+# their own toolchain-specific rules on top of these.
 
-# Intermediate build products: universal binaries, generated icons,
-# DMG staging, verification mounts, and packaging logs.
-.build-artifacts/
-
-# Release artifacts (.app, .dmg, checksums, manifest).
-# Published to GitHub Releases, never committed.
+# Release artifacts. Published to GitHub Releases, never committed.
 dist/
 
-# Cache of forge3 release archives downloaded by scripts/fetch-forge3.sh.
-# Reproducible from the pinned tag + SHA-256 in scripts/versions.sh.
-Vendor/
-
-# Signing material. Must never be committed; supplied via CI secrets
-# or the local keychain.
+# Signing material. Must never be committed; supplied via CI secrets or the
+# local keychain/certificate store.
 *.p12
+*.pfx
 *.cer
 *.certSigningRequest
 *.provisionprofile
 .env
 .env.local
 
-# macOS
+# OS cruft
 .DS_Store
+Thumbs.db

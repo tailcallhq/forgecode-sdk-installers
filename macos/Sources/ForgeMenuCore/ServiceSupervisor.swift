@@ -65,7 +65,7 @@ public actor ServiceSupervisor {
         clientFactory: @escaping ClientFactory,
         logger: AppLogger = .shared,
         configuration: Configuration = Configuration(),
-        appVersion: String? = AppVersion.current,
+        appVersion: String? = AppVersion.currentDescription,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
             try await ServiceSupervisor.systemSleep(seconds)
         },
@@ -400,7 +400,10 @@ public actor ServiceSupervisor {
         processGeneration expectedProcessGeneration: UInt64
     ) async {
         do {
-            let version = try await client.sdkVersion()
+            let raw = try await client.sdkVersion()
+            // Normalize through semver so a `v` prefix or stray whitespace from
+            // the server renders identically to the app's own version.
+            let version = AppVersion.parse(raw)?.description ?? raw
             guard expectedProcessGeneration == generation, snapshot.sdkVersion != version else { return }
             snapshot.sdkVersion = version
             publishSnapshot()

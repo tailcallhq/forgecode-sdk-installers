@@ -2,8 +2,11 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# PROJECT_ROOT is this platform's directory (macos/); REPO_ROOT is the
+# multi-platform repository root that also holds windows/ and linux/.
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-export PROJECT_ROOT
+REPO_ROOT=$(CDPATH= cd -- "$PROJECT_ROOT/.." && pwd)
+export PROJECT_ROOT REPO_ROOT
 
 . "$SCRIPT_DIR/versions.sh"
 
@@ -74,8 +77,11 @@ safe_remove() {
 }
 
 validate_release_inputs() {
-  printf '%s\n' "$APP_VERSION" | awk '/^[0-9]+([.][0-9]+){0,2}$/ { ok=1 } END { exit !ok }' \
-    || fail "APP_VERSION must contain one to three dot-separated numeric components"
+  # Exactly three components: the app parses this with a strict semver reader,
+  # so a two-component version would build fine and then render no version at
+  # all at runtime.
+  printf '%s\n' "$APP_VERSION" | awk '/^[0-9]+([.][0-9]+){2}$/ { ok=1 } END { exit !ok }' \
+    || fail "APP_VERSION must be a three-component semver such as 0.1.0"
   printf '%s\n' "$BUILD_NUMBER" | awk '/^[0-9]+([.][0-9]+){0,2}$/ { ok=1 } END { exit !ok }' \
     || fail "BUILD_NUMBER must contain one to three dot-separated numeric components"
   printf '%s\n' "$MINIMUM_MACOS_VERSION" | awk '/^[0-9]+([.][0-9]+){1,2}$/ { ok=1 } END { exit !ok }' \
