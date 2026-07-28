@@ -1,0 +1,301 @@
+import AppKit
+import ForgeMenuCore
+import Foundation
+import ServiceManagement
+
+@main
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.run()
+    }
+
+    private let preferences = AppPreferences()
+    private let logger = AppLogger.shared
+    private var statusItem: NSStatusItem!
+    private var popoverController: PopoverController!
+    private var serviceController: ServiceController!
+    private var terminationReplyPending = false
+    private var terminationWatchdog: DispatchWorkItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        installApplicationMainMenu()
+
+        do {
+            let paths = try RuntimePaths.resolve()
+            let processHost = ForgeProcessHost(
+                configuration: .init(
+                    executableURL: paths.forgeExecutable,
+                    logURL: paths.serviceLog
+                ),
+                logger: logger
+            )
+            let supervisor = ServiceSupervisor(
+                processHost: processHost,
+                clientFactory: { endpoint in WebSocketRPCClient(endpoint: endpoint.webSocketURL) },
+                logger: logger
+            )
+            serviceController = ServiceController(preferences: preferences, supervisor: supervisor)
+
+            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            statusItem.button?.image = ForgeCodeLogo.statusImage()
+            statusItem.button?.image?.isTemplate = true
+            statusItem.button?.target = self
+            statusItem.button?.action = #selector(togglePopover(_:))
+            statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
+            popoverController = PopoverController(preferences: preferences)
+            wireActions(paths: paths)
+            serviceController.onSnapshotChanged = { [weak self] snapshot in
+                guard let self else { return }
+                self.popoverController.update(snapshot: snapshot, loginItemState: self.loginItemState)
+                self.updateStatusIcon(snapshot.phase)
+            }
+            synchronizeLoginPreference()
+            popoverController.update(snapshot: serviceController.snapshot, loginItemState: loginItemState)
+            serviceController.startAccordingToPreference()
+        } catch {
+            logger.error(error.localizedDescription)
+            presentFatalError(error.localizedDescription)
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationReplyPending else { return .terminateLater }
+        terminationReplyPending = true
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, self.terminationReplyPending else { return }
+            self.logger.error("Termination watchdog expired; allowing app termination")
+            self.terminationReplyPending = false
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        terminationWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: watchdog)
+        Task {
+            await serviceController?.stopForTermination()
+            await MainActor.run {
+                guard self.terminationReplyPending else { return }
+                self.terminationWatchdog?.cancel()
+                self.terminationWatchdog = nil
+                self.terminationReplyPending = false
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
+
+    private func wireActions(paths: RuntimePaths) {
+        popoverController.onWillShow = { [weak self] in self?.synchronizeLoginPreference() }
+        popoverController.onRunServiceChanged = { [weak self] enabled in
+            self?.serviceController.setRunService(enabled)
+        }
+        popoverController.onLaunchAtLoginChanged = { [weak self] enabled in
+            self?.setLaunchAtLogin(enabled)
+        }
+        popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
+        popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
+        popoverController.onRestart = { [weak self] in self?.serviceController.restart() }
+        popoverController.onOpenLogs = { [weak self] in
+            do {
+                try FileManager.default.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+                NSWorkspace.shared.open(paths.logsDirectory)
+            } catch {
+                self?.presentActionError(title: "Logs could not be opened", error: error)
+            }
+        }
+        popoverController.onConfigureConsoleOrigin = { [weak self] in
+            self?.configureConsoleOrigin()
+        }
+        popoverController.onOpenFrontend = { [weak self] in
+            self?.openFrontend()
+        }
+        popoverController.onOpenConversation = { [weak self] conversationID in
+            self?.openConversation(conversationID)
+        }
+        popoverController.onShowError = { [weak self] message in
+            let error = NSError(domain: "ForgeMenuBar", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: message
+            ])
+            self?.presentActionError(title: "ForgeCode needs attention", error: error)
+        }
+        popoverController.onQuit = { NSApp.terminate(nil) }
+    }
+
+    private func configureConsoleOrigin() {
+        let current = (try? ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin).absoluteString)
+            ?? ConsoleURLBuilder.defaultOrigin
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "ForgeCode Console Origin"
+        alert.informativeText = "Enter an HTTP or HTTPS origin. The FORGE_CONSOLE_ORIGIN environment variable takes precedence when set."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Use Default")
+        let field = NSTextField(string: current)
+        field.placeholderString = ConsoleURLBuilder.defaultOrigin
+        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+        alert.accessoryView = field
+        let response = alert.runModal()
+        if response == .alertThirdButtonReturn {
+            preferences.consoleOrigin = nil
+            return
+        }
+        guard response == .alertFirstButtonReturn else { return }
+        do {
+            _ = try ConsoleURLBuilder.validateOrigin(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            preferences.consoleOrigin = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            presentActionError(title: "Console origin is invalid", error: error)
+        }
+    }
+
+    private func openFrontend() {
+        do {
+            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let url = try ConsoleURLBuilder.consoleURL(
+                origin: origin,
+                endpoint: serviceController.snapshot.endpoint
+            )
+            guard NSWorkspace.shared.open(url) else {
+                throw ForgeCoreError.connection("The default browser did not accept the ForgeCode frontend URL.")
+            }
+        } catch {
+            logger.error("Could not open ForgeCode frontend: \(error.localizedDescription)")
+            presentActionError(title: "ForgeCode frontend could not be opened", error: error)
+        }
+    }
+
+    private func openConversation(_ conversationID: String) {
+        do {
+            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let url = try ConsoleURLBuilder.conversationURL(
+                conversationID: conversationID,
+                origin: origin,
+                endpoint: serviceController.snapshot.endpoint
+            )
+            guard NSWorkspace.shared.open(url) else {
+                throw ForgeCoreError.connection("The default browser did not accept the ForgeCode console URL.")
+            }
+        } catch {
+            logger.error("Could not open conversation: \(error.localizedDescription)")
+            presentActionError(title: "Conversation could not be opened", error: error)
+        }
+    }
+
+    private func installApplicationMainMenu() {
+        let mainMenu = NSMenu(title: "Main Menu")
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "ForgeCode")
+        let quit = NSMenuItem(
+            title: "Quit ForgeCode",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        quit.keyEquivalentModifierMask = [.command]
+        quit.target = NSApp
+        appMenu.addItem(quit)
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            synchronizeLoginPreference()
+            if loginItemState == .requiresApproval {
+                presentApprovalRequired()
+            }
+        } catch {
+            synchronizeLoginPreference()
+            logger.error("Could not update Launch at Login: \(error.localizedDescription)")
+            presentActionError(
+                title: "Launch at Login could not be changed",
+                message: "Open System Settings › General › Login Items, allow ForgeCode, then try again.",
+                error: error
+            )
+        }
+    }
+
+    private func synchronizeLoginPreference() {
+        preferences.launchAtLogin = SMAppService.mainApp.status == .enabled
+        popoverController?.update(snapshot: serviceController?.snapshot ?? ServiceSnapshot(), loginItemState: loginItemState)
+    }
+
+    private var loginItemState: PopoverController.LoginItemState {
+        switch SMAppService.mainApp.status {
+        case .enabled: return .enabled
+        case .notRegistered: return .disabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .unavailable("The app must be installed in Applications.")
+        @unknown default: return .unavailable("macOS returned an unknown login item status.")
+        }
+    }
+
+    private func presentApprovalRequired() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Approve Launch at Login"
+        alert.informativeText = "macOS requires approval in System Settings › General › Login Items before ForgeCode can launch automatically."
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn {
+            openLoginItemsSettings()
+        }
+    }
+
+    private func openLoginItemsSettings() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.users?LoginItems"
+        ]
+        for value in urls {
+            if let url = URL(string: value), NSWorkspace.shared.open(url) { return }
+        }
+        let error = NSError(domain: "ForgeMenuBar", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "System Settings could not be opened."
+        ])
+        presentActionError(title: "Login Items settings could not be opened", error: error)
+    }
+
+    @objc private func togglePopover(_ sender: NSStatusBarButton) {
+        popoverController.toggle(relativeTo: sender)
+    }
+
+    private func updateStatusIcon(_ phase: ServicePhase) {
+        statusItem.button?.image = ForgeCodeLogo.statusImage()
+        statusItem.button?.image?.isTemplate = true
+        switch phase {
+        case .ready: statusItem.button?.contentTintColor = nil
+        case .starting, .restarting: statusItem.button?.contentTintColor = .controlAccentColor
+        case .failed: statusItem.button?.contentTintColor = .systemOrange
+        case .disabled, .stopped: statusItem.button?.contentTintColor = .secondaryLabelColor
+        }
+    }
+
+    private func presentActionError(title: String, message: String? = nil, error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = [message, error.localizedDescription].compactMap { $0 }.joined(separator: "\n\n")
+        alert.runModal()
+    }
+
+    private func presentFatalError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "ForgeCode could not start"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Quit")
+        alert.runModal()
+        NSApp.terminate(nil)
+    }
+}
