@@ -130,7 +130,10 @@ PY
   esac
   validate_macho "$destination/$output_name" "$(printf '%s' "$arch" | sed 's/aarch64/arm64/')"
   expected_version=${FORGE3_VERSION#v}
-  actual_version=$("$destination/$output_name" --version 2>/dev/null | awk 'NF {print $NF; exit}')
+  # This is the one place the pipeline executes freshly downloaded code. The
+  # binary is checksum-pinned, but the fetch credential has no business being
+  # in its environment, so drop it for the duration of the version check.
+  actual_version=$(env -u GH_TOKEN -u GITHUB_TOKEN "$destination/$output_name" --version 2>/dev/null | awk 'NF {print $NF; exit}')
   [ "$actual_version" = "$expected_version" ] \
     || fail "forge3 version mismatch for $arch: expected $expected_version, got ${actual_version:-none}"
   printf '%s  %s\n' "$expected_sha" "$archive" > "$destination/$archive.sha256"

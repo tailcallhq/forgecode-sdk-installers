@@ -41,10 +41,15 @@ public struct ServiceSnapshot: Equatable, Sendable {
     public var activeConversations: [ActiveConversation]
     public var conversationStreamState: ConversationStreamState
     public var streamError: String?
-    /// SDK version reported by `rpc.discover` as `info.version`. Versioned
-    /// independently of the app, so both are tracked separately.
+    /// SDK version reported by `rpc.discover` as `info.version`.
+    ///
+    /// Tracked separately from `appVersion` even though the app ships 1:1 with
+    /// forge3: this is what the *running* helper reports, so a disagreement is
+    /// real information (a dev build, or a helper that is not the one
+    /// packaged) rather than something to assume away.
     public var sdkVersion: String?
-    /// The app's own `CFBundleShortVersionString`. Constant for a given build.
+    /// The app's `CFBundleShortVersionString`, i.e. the version of the forge3
+    /// release it was packaged with. Constant for a given build.
     public var appVersion: String?
 
     public init(

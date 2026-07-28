@@ -1,0 +1,128 @@
+name: CI
+
+# Build and test on every change. Packaging needs a credential that fork PRs
+# cannot have, so it degrades to a notice rather than a red X — see the
+# `package` job's `if:`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede in-flight runs of the same ref; a stale PR build helps nobody.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Nothing in this job pushes, and it builds third-party SwiftPM
+          # dependencies. The persisted token would only be read-only here, but
+          # an unused credential on disk is still an unused credential on disk.
+          persist-credentials: false
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: macos/.build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('macos/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      - name: Shell script syntax
+        # Catches a broken script before it is run halfway through a release.
+        run: |
+          set -euo pipefail
+          status=0
+          for script in macos/scripts/*.sh versions.sh; do
+            bash -n "$script" || { echo "::error file=$script::shell syntax error"; status=1; }
+          done
+          exit $status
+
+      - name: Python script syntax
+        run: python3 -m compileall -q scripts/
+
+      - name: swift test
+        working-directory: macos
+        run: swift test
+
+      - name: swift build -c release
+        working-directory: macos
+        run: swift build -c release
+
+  package:
+    name: Package unsigned DMG
+    runs-on: macos-14
+    needs: test
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # See the test job. This one additionally executes the downloaded
+          # forge3 binary via package-unsigned.sh, so leaving a credential in
+          # .git/config is pointless risk for zero benefit.
+          persist-credentials: false
+
+      # The pinned forge3 lives in a private repository, so packaging needs
+      # FORGE3_FETCH_TOKEN. The default GITHUB_TOKEN is scoped to THIS repo and
+      # cannot read the SDK. Secrets are unavailable to fork PRs by design, so
+      # detect that and skip instead of failing a contributor's build.
+      - name: Check for fetch credentials
+        id: creds
+        env:
+          FORGE3_FETCH_TOKEN: ${{ secrets.FORGE3_FETCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${FORGE3_FETCH_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::FORGE3_FETCH_TOKEN is unavailable (fork PR or unconfigured secret); skipping packaging. Tests and the release build still ran."
+          fi
+
+      - name: Cache SwiftPM
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/cache@v4
+        with:
+          path: macos/.build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('macos/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      - name: Package (unsigned)
+        if: steps.creds.outputs.available == 'true'
+        working-directory: macos
+        env:
+          # fetch-forge3.sh reads GH_TOKEN or GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.FORGE3_FETCH_TOKEN }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package-unsigned.sh
+
+      - name: Resolve artifact version
+        if: steps.creds.outputs.available == 'true'
+        id: version
+        run: |
+          set -euo pipefail
+          . ./versions.sh
+          echo "app_version=${FORGE3_VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForgeCode-${{ steps.version.outputs.app_version }}-unsigned-dmg
+          path: |
+            macos/dist/unsigned/*.dmg
+            macos/dist/unsigned/SHA256SUMS
+            macos/dist/unsigned/manifest.txt
+          if-no-files-found: error
+          retention-days: 14

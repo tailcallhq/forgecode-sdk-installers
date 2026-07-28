@@ -1,0 +1,322 @@
+name: forge3 released
+
+# Reacts to a published forge3 release by pinning it here, proving it actually
+# builds a shippable DMG, and only then tagging a release.
+#
+# Trigger chain:
+#   SDK: human publishes draft release vX.Y.Z
+#     -> SDK workflow sends repository_dispatch (type: sdk-released) using
+#        RELEASES_DISPATCH_TOKEN (Contents:write on this repo)
+#     -> this workflow
+#
+# workflow_dispatch is the manual re-run path for when a dispatch is lost, or a
+# bump needs retrying after a transient CI failure.
+#
+# SECURITY: `client_payload` is attacker-controlled in the general case. Anyone
+# able to mint a dispatch can name any tag. Therefore:
+#   - the tag is matched against a strict anchored regex before ANY use;
+#   - it is passed through the environment and quoted, never interpolated
+#     into a shell command as `${{ ... }}`;
+#   - the named release must actually exist AND be published in the SDK repo;
+#   - checksums come from the release itself and are cross-checked against the
+#     GitHub-reported asset digest, then re-verified a third time by
+#     fetch-forge3.sh when the package is built;
+#   - the version must strictly advance the currently pinned one, so a leaked
+#     dispatch token cannot replay an old-but-real release to downgrade main.
+#
+# TOKENS: two, deliberately split by capability.
+#   FORGE3_FETCH_TOKEN  fine-grained PAT, Contents:read on tailcallhq/forgecode-sdk
+#                       only. Read-only, and the only credential exposed to the
+#                       steps that build and execute downloaded code.
+#   REPO_PUSH_TOKEN     fine-grained PAT, Contents:write on
+#                       tailcallhq/forgecode-sdk-macos ONLY (no other repo, no
+#                       other permission). Never written to disk and never
+#                       present in the environment of any step except the push.
+
+on:
+  repository_dispatch:
+    types: [sdk-released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: forge3 release tag to pin, e.g. v0.1.191
+        required: true
+        type: string
+      allow_rollback:
+        description: >-
+          Pin a version that does NOT advance the current pin (deliberate
+          rollback, or re-tagging a version whose commit landed but whose tag
+          push failed). Manual runs only.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two bumps racing would interleave commits on main and could tag the wrong
+  # tree, so they are serialised rather than run in parallel.
+  #
+  # CAVEAT, deliberately recorded rather than papered over: a concurrency group
+  # holds at most one RUNNING plus one PENDING run. If v0.1.191 is building and
+  # v0.1.192 is pending when v0.1.193 arrives, the v0.1.192 run is cancelled
+  # (grey, not red — the failure-report step never executes, so no issue is
+  # filed) and that release is silently skipped. The newest release always
+  # survives. Recovery is the workflow_dispatch path below with the skipped
+  # tag; note the monotonicity guard will then reject it as non-advancing, so a
+  # deliberate backfill needs allow_rollback: true.
+  group: sdk-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Pin, verify, tag
+    runs-on: macos-14
+    permissions:
+      contents: read   # the push uses REPO_PUSH_TOKEN, not GITHUB_TOKEN
+      issues: write    # to report a failed verification
+    steps:
+      - name: Validate dispatched tag
+        id: tag
+        env:
+          RAW_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Quoted expansion of an environment variable: the payload never
+          # reaches the shell as code.
+          #
+          # Matched with bash's [[ =~ ]] rather than grep -E on purpose. grep
+          # matches line by line, so a payload of "v1.2.3\nv9.9.9" would pass
+          # and then inject a second line into GITHUB_OUTPUT. [[ =~ ]] anchors
+          # against the whole string, newlines included.
+          if [[ ! "${RAW_TAG:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # The rejected value is printed on its own line, outside the
+            # ::error:: workflow command, so an untrusted payload cannot shape
+            # a workflow directive on the way out.
+            echo "::error::rejected dispatched tag: must match ^v[0-9]+\.[0-9]+\.[0-9]+$"
+            printf 'rejected value: %s\n' "${RAW_TAG:-<empty>}"
+            exit 1
+          fi
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check required secrets
+        env:
+          FORGE3_FETCH_TOKEN: ${{ secrets.FORGE3_FETCH_TOKEN }}
+          REPO_PUSH_TOKEN: ${{ secrets.REPO_PUSH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Named up front: a missing secret otherwise surfaces as a generic
+          # failure deep into a 20-minute macOS build.
+          missing=()
+          [ -n "${FORGE3_FETCH_TOKEN:-}" ] || missing+=("FORGE3_FETCH_TOKEN (Contents:read on tailcallhq/forgecode-sdk)")
+          [ -n "${REPO_PUSH_TOKEN:-}" ] || missing+=("REPO_PUSH_TOKEN (Contents:write on tailcallhq/forgecode-sdk-macos)")
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf '::error::missing required repository secret: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          # Full history so the tag-existence check below is authoritative.
+          fetch-depth: 0
+          # No credential is written to .git/config. This job runs `swift test`
+          # (which resolves and builds third-party SwiftPM dependencies) and
+          # package-unsigned.sh (which EXECUTES the forge3 binary it just
+          # downloaded from the SDK release). Anything persisted here would be
+          # readable by that code for the whole job, turning an SDK-release
+          # compromise into write access to this repository — precisely what
+          # the read/write token split exists to prevent. The push step below
+          # supplies REPO_PUSH_TOKEN through an ephemeral credential helper
+          # instead, so the write credential exists only for that one command.
+          persist-credentials: false
+
+      - name: Skip if already released, and refuse to go backwards
+        id: guard
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          # Rollback is honoured ONLY for a human-triggered workflow_dispatch.
+          # This is keyed off the event name, so no repository_dispatch payload
+          # can ever set it, whatever it puts in client_payload.
+          ALLOW_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_rollback || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::notice::${TAG} is already tagged here; nothing to do."
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Monotonicity. The tag-existence check above only stops re-processing
+          # something already tagged HERE; it says nothing about direction.
+          # Without this, anyone able to mint a dispatch (a leaked
+          # RELEASES_DISPATCH_TOKEN, or a careless manual re-run) could replay a
+          # genuine older release: the release exists and is published, so the
+          # checksum and build gates all pass, main is committed backwards, and
+          # the resulting GitHub release — being the newest published one —
+          # becomes 'latest' and serves users an OLDER forge3.
+          . ./versions.sh
+          highest=$(printf '%s\n%s\n' "$FORGE3_VERSION" "$TAG" | sort -V | tail -n1)
+          if [ "$TAG" = "$FORGE3_VERSION" ] || [ "$highest" != "$TAG" ]; then
+            if [ "$ALLOW_ROLLBACK" = "true" ]; then
+              echo "::warning::${TAG} does not advance ${FORGE3_VERSION}; continuing because allow_rollback was set on a manual run."
+            else
+              echo "::error::refusing to pin ${TAG}: it does not strictly advance the currently pinned ${FORGE3_VERSION}. If this is a deliberate rollback or a re-tag of an already-committed pin, re-run this workflow manually with allow_rollback: true."
+              exit 1
+            fi
+          fi
+          echo "done=false" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve archive checksums from the release
+        if: steps.guard.outputs.done == 'false'
+        id: sums
+        env:
+          GH_TOKEN: ${{ secrets.FORGE3_FETCH_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Verifies the release exists and is PUBLISHED (not a draft): the SDK
+          # drafts a release before its artifacts are final, and a draft is not
+          # a release anyone should be shipping.
+          python3 scripts/fetch-release-checksums.py --tag "$TAG" --require-published
+
+      - name: Pin the new version
+        if: steps.guard.outputs.done == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          AARCH64_SHA: ${{ steps.sums.outputs.aarch64_sha }}
+          X86_64_SHA: ${{ steps.sums.outputs.x86_64_sha }}
+        run: |
+          set -euo pipefail
+          # Fails loudly if the assignment patterns stop matching, rather than
+          # silently rewriting nothing and shipping a mislabelled build.
+          python3 scripts/bump-forge3.py \
+            --tag "$TAG" \
+            --aarch64-sha "$AARCH64_SHA" \
+            --x86-64-sha "$X86_64_SHA" \
+            --check
+          git --no-pager diff --stat
+
+      - name: Cache SwiftPM
+        if: steps.guard.outputs.done == 'false'
+        uses: actions/cache@v4
+        with:
+          path: macos/.build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('macos/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      - name: swift test
+        if: steps.guard.outputs.done == 'false'
+        id: tests
+        working-directory: macos
+        run: swift test
+
+      - name: Build the full unsigned package
+        if: steps.guard.outputs.done == 'false'
+        id: verify
+        working-directory: macos
+        env:
+          GH_TOKEN: ${{ secrets.FORGE3_FETCH_TOKEN }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # The real gate. This re-downloads both archives, verifies them
+          # against the pins just written, checks the binary reports the
+          # expected version and architecture, assembles the bundle and builds
+          # the DMG. If forge3 changed in a way that breaks packaging, it fails
+          # here — before anything is tagged.
+          scripts/package-unsigned.sh
+
+      - name: Commit, push and tag
+        if: steps.guard.outputs.done == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          # The ONLY step in this workflow that sees the write credential.
+          # Fine-grained PAT, Contents:write on tailcallhq/forgecode-sdk-macos
+          # and nothing else.
+          REPO_PUSH_TOKEN: ${{ secrets.REPO_PUSH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'forgecode-ci'
+          git config user.email 'ci@forgecode.dev'
+          git add versions.sh macos/scripts/versions.sh
+          if git diff --cached --quiet; then
+            echo "::notice::pins already matched ${TAG}; tagging the existing tree."
+          else
+            git commit -m "chore: bump forge3 to ${TAG}"
+          fi
+          git tag -a "$TAG" -m "ForgeCode ${TAG#v}"
+
+          # Pushed with REPO_PUSH_TOKEN (a PAT), NOT the default GITHUB_TOKEN.
+          # GitHub deliberately does not raise workflow events for pushes made
+          # with GITHUB_TOKEN, so the tag would land and release.yml would
+          # never run. A PAT's push is an ordinary user push and does trigger it.
+          #
+          # The credential is supplied by an inline helper on the command line
+          # rather than by actions/checkout's `token:`, so it is never written
+          # to .git/config and never visible to the earlier steps that build
+          # dependencies and execute the downloaded forge3 binary. The leading
+          # empty `credential.helper=` clears any inherited helper (including a
+          # runner-level one) so only ours is consulted; the value is read from
+          # the environment by the shell git spawns, so the token itself never
+          # appears in a command line or in the log.
+          #
+          # Fallback if the PAT is ever unavailable or rotated: drop the helper
+          # (pushing with GITHUB_TOKEN still lands the commit and tag) and then
+          # invoke the release explicitly with
+          #   gh workflow run release.yml --ref "$TAG"
+          # release.yml carries a workflow_dispatch trigger for exactly this.
+          #
+          # OPERATIONAL: this pushes straight to main. If main ever gains
+          # branch protection requiring pull requests, this push starts failing
+          # and the PAT will need a bypass entry (or this step needs to open a
+          # PR instead). A concurrent human push to main causes a
+          # non-fast-forward failure; that surfaces loudly as a red run plus the
+          # issue below, and re-running via workflow_dispatch is idempotent.
+          push_with_token() {
+            git -c credential.helper= \
+                -c credential.helper='!f() { echo username=x-access-token; echo "password=${REPO_PUSH_TOKEN}"; }; f' \
+                push "https://github.com/${GITHUB_REPOSITORY}.git" "$@"
+          }
+          push_with_token HEAD:main
+          push_with_token "refs/tags/${TAG}"
+          echo "### Bumped forge3 to \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag pushed; release.yml takes it from here." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report failure
+        # Runs only when something above actually failed, and never for the
+        # idempotent skip path.
+        if: failure() && steps.guard.outputs.done == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="forge3 ${TAG} failed desktop verification"
+          # Don't pile duplicate issues onto a repeatedly-retried bump.
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n' \
+            "Pinning forge3 \`${TAG}\` did not produce a shippable macOS package, so **nothing was tagged or released**." \
+            "" \
+            "| stage | result |" \
+            "| --- | --- |" \
+            "| checksum resolution | ${{ steps.sums.outcome }} |" \
+            "| swift test | ${{ steps.tests.outcome }} |" \
+            "| package-unsigned.sh | ${{ steps.verify.outcome }} |" \
+            "" \
+            "Full log: ${RUN_URL}" \
+            "" \
+            "The pins in \`versions.sh\` are unchanged on \`main\`. Once the cause is fixed, re-run via" \
+            "the **forge3 released** workflow with tag \`${TAG}\`.")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label ci || \
+              gh issue create --title "$title" --body "$body"
+          fi

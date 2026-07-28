@@ -23,17 +23,19 @@ FORGE3_OFFLINE=1 scripts/package-unsigned.sh
 
 ## Versioning
 
-The app and the bundled service version independently:
+There is one version, and it is the SDK's — the app ships 1:1 with the `forge3` it bundles, so `forge3` `v0.1.191` becomes ForgeCode `0.1.191` in `ForgeCode-0.1.191.dmg`:
 
 | Variable | Defined in | Meaning |
 | --- | --- | --- |
-| `APP_VERSION` | `../versions.sh` | ForgeCode's own semver, shown as `ForgeCode 0.1.0` |
-| `BUILD_NUMBER` | `scripts/common.sh` | `CFBundleVersion`; must increase on every published build |
-| `FORGE3_VERSION` | `../versions.sh` | Pinned `forge3` release tag, shown as `Server 0.1.190` |
+| `FORGE3_VERSION` | `../versions.sh` | Pinned `forge3` release tag — the single source of truth |
+| `APP_VERSION` | derived | `FORGE3_VERSION` without the `v`, shown as `Version 0.1.190` |
+| `BUILD_NUMBER` | `scripts/common.sh` | `CFBundleVersion`, set from the CI run number |
 
-`APP_VERSION` and `FORGE3_VERSION` live at the repository root because one tag releases every platform; only the macOS archive names and checksums are in `scripts/versions.sh`.
+`FORGE3_VERSION` lives at the repository root because one tag releases every platform; only the macOS archive names and checksums are in `scripts/versions.sh`. `APP_VERSION_DEFAULT` is derived from it and is never edited by hand.
 
-Both are overridable, so a release workflow can set `APP_VERSION`/`BUILD_NUMBER` from the git tag without disturbing the `forge3` pin. Every build records both in `dist/*/manifest.txt`.
+Because the two versions agree on every published build, the popover shows the number once as `Version 0.1.190`. A separate `Server` line appears only when the running helper reports something different — a dev build, or a helper that is not the one packaged, both of which are worth seeing rather than hiding.
+
+`BUILD_NUMBER` is deliberately not the version: Sparkle requires `CFBundleVersion` to increase monotonically across every published build, which a tag-derived value cannot guarantee if a tag is deleted and re-released. Both `APP_VERSION` and `BUILD_NUMBER` remain overridable in the environment for local experiments, and every build records them in `dist/*/manifest.txt`.
 
 Versions are parsed and compared as semver via [mxcl/Version](https://github.com/mxcl/Version), mirroring the `semver` crate the SDK uses. A leading `v` and surrounding whitespace are tolerated, and build metadata is ignored when comparing, per the specification.
 

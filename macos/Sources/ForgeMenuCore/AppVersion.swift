@@ -1,11 +1,11 @@
 import Foundation
 import Version
 
-/// The app's own version, read from the bundle.
+/// The app's version, read from the bundle.
 ///
-/// Deliberately separate from the bundled `forge3` version: the app and the
-/// server are released independently, so a UI-only release can ship without a
-/// server bump, and a server bump does not masquerade as a new app release.
+/// This is the version of the bundled `forge3` release: the app ships 1:1 with
+/// the SDK, so SDK `v0.1.191` is ForgeCode `0.1.191`. There is no independent
+/// app version to drift from the server it embeds.
 public enum AppVersion {
     /// `CFBundleShortVersionString` of the running bundle, or `nil` when
     /// unavailable — for example under `swift test`, where there is no app

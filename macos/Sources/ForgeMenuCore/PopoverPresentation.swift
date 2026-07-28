@@ -132,15 +132,20 @@ public struct PopoverPresentation: Equatable, Sendable {
         }
     }
 
-    /// The app and the bundled server version independently, since a release
-    /// of either can move without the other. The server line only appears once
-    /// the running helper has reported it.
+    /// One version, shown once. The app releases 1:1 with the forge3 it
+    /// bundles, so the two versions agree on every published build and
+    /// repeating the same number twice would be noise.
+    ///
+    /// The server is still shown separately when it genuinely disagrees —
+    /// a dev build reports `0.1.0-dev`, and a mismatch on a real build means
+    /// the running helper is not the one packaged, which is worth seeing
+    /// rather than hiding.
     private static func versionLabel(snapshot: ServiceSnapshot) -> String? {
         guard let app = snapshot.appVersion else {
             return snapshot.sdkVersion.map { "Server \($0)" }
         }
-        guard let server = snapshot.sdkVersion else { return app }
-        return "\(app) · Server \(server)"
+        guard let server = snapshot.sdkVersion, server != app else { return "Version \(app)" }
+        return "Version \(app) · Server \(server)"
     }
 
     private static func endpointTooltip(_ snapshot: ServiceSnapshot) -> String? {
@@ -148,7 +153,11 @@ public struct PopoverPresentation: Equatable, Sendable {
         let address = endpoint.webSocketURL.absoluteString
         var lines = [address]
         if let app = snapshot.appVersion { lines.append("ForgeCode \(app)") }
-        if let server = snapshot.sdkVersion { lines.append("Server \(server)") }
+        // Same rule as versionLabel: the server line is redundant when it
+        // matches the app version it shipped with.
+        if let server = snapshot.sdkVersion, server != snapshot.appVersion {
+            lines.append("Server \(server)")
+        }
         return lines.joined(separator: "\n")
     }
 

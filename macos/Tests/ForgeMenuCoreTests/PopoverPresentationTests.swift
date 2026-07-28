@@ -26,29 +26,49 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertTrue(presentation.canExpandConversations)
     }
 
-    func testVersionLabelShowsAppAndServerIndependently() {
-        let both = PopoverPresentation.make(snapshot: ServiceSnapshot(
+    func testMatchingVersionsAreShownOnce() {
+        // The app releases 1:1 with the forge3 it bundles, so on every
+        // published build these agree and the number is shown once.
+        let matching = PopoverPresentation.make(snapshot: ServiceSnapshot(
             phase: .ready,
             endpoint: LoopbackEndpoint(port: 9_755),
             conversationStreamState: .subscribed,
             sdkVersion: "0.1.190",
-            appVersion: "1.0.0"
+            appVersion: "0.1.190"
         ))
-        XCTAssertEqual(both.versionLabel, "1.0.0 · Server 0.1.190")
+        XCTAssertEqual(matching.versionLabel, "Version 0.1.190")
         XCTAssertEqual(
-            both.endpointTooltip,
-            "ws://127.0.0.1:9755\nForgeCode 1.0.0\nServer 0.1.190"
+            matching.endpointTooltip,
+            "ws://127.0.0.1:9755\nForgeCode 0.1.190",
+            "a server line repeating the app version is noise"
         )
 
         // Before the helper reports in, the app version still stands alone.
         let appOnly = PopoverPresentation.make(snapshot: ServiceSnapshot(
             phase: .starting,
-            appVersion: "1.0.0"
+            appVersion: "0.1.190"
         ))
-        XCTAssertEqual(appOnly.versionLabel, "1.0.0")
+        XCTAssertEqual(appOnly.versionLabel, "Version 0.1.190")
 
         let neither = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .stopped))
         XCTAssertNil(neither.versionLabel)
+    }
+
+    func testDivergentServerVersionIsShownSeparately() {
+        // A dev build reports its own version, and on a real build a mismatch
+        // means the running helper is not the one packaged — surface it.
+        let diverged = PopoverPresentation.make(snapshot: ServiceSnapshot(
+            phase: .ready,
+            endpoint: LoopbackEndpoint(port: 9_755),
+            conversationStreamState: .subscribed,
+            sdkVersion: "0.1.0-dev",
+            appVersion: "0.1.190"
+        ))
+        XCTAssertEqual(diverged.versionLabel, "Version 0.1.190 · Server 0.1.0-dev")
+        XCTAssertEqual(
+            diverged.endpointTooltip,
+            "ws://127.0.0.1:9755\nForgeCode 0.1.190\nServer 0.1.0-dev"
+        )
     }
 
     func testConversationsSummaryReflectsCountAndState() {

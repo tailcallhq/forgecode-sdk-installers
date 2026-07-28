@@ -17,3 +17,7 @@ dist/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Byte-cache from scripts/*.py (CI runs python3 -m compileall)
+__pycache__/
+*.pyc
