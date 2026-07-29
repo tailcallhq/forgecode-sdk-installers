@@ -190,8 +190,10 @@ private final class SequenceRuntimeInstaller: RuntimeInstalling, @unchecked Send
 
 private let cachedRuntimeInstaller = StubRuntimeInstaller()
 
+// Generous default: passing conditions are met in milliseconds; the timeout
+// only bounds how long a genuine failure can stall a loaded CI runner.
 private func waitUntil(
-    timeout: TimeInterval = 2,
+    timeout: TimeInterval = 30,
     condition: @escaping @Sendable () async -> Bool
 ) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)

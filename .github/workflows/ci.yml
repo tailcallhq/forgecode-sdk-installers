@@ -18,6 +18,7 @@ jobs:
   test:
     name: Test and Package (unsigned)
     runs-on: macos-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -36,12 +37,10 @@ jobs:
         working-directory: macos
         run: tools/fetch-sparkle.sh
 
-      - name: Run tests
+      - name: Test and build unsigned package
         working-directory: macos
-        run: swift test
-
-      - name: Build unsigned package
-        working-directory: macos
+        # package-unsigned.sh mandatorily runs the full swift test suite via
+        # run_tests, so a separate `swift test` step would run everything twice.
         run: scripts/package-unsigned.sh
 
       - name: Upload unsigned artifacts

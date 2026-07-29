@@ -136,7 +136,7 @@ final class ProcessIntegrationTests: XCTestCase {
         try await waitForFile(fixture.logURL, containing: "127.0.0.1:55432")
         let started = Date()
         await host.stop(gracePeriod: 0.2)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
 
         let log = try String(contentsOf: fixture.logURL)
         XCTAssertTrue(log.contains("--log-format\njson\nws\n--addr\n127.0.0.1:55432"))
@@ -365,10 +365,12 @@ final class ProcessIntegrationTests: XCTestCase {
         )
         try await host.start(runtime: first.runtime, endpoint: LoopbackEndpoint(port: 55_441), generation: 1)
         try await waitForFile(logURL, containing: "first-ready")
-        await host.stop(gracePeriod: 0.5)
+        await host.stop(gracePeriod: 0.2)
         try await host.start(runtime: second.runtime, endpoint: LoopbackEndpoint(port: 55_442), generation: 2)
         try await waitForFile(logURL, containing: "second-ready")
-        try await Task.sleep(nanoseconds: 700_000_000)
+        // Sleep past the first lifecycle's grace deadline so a stale kill
+        // timer, if one survived, would have fired against the replacement.
+        try await Task.sleep(nanoseconds: 400_000_000)
 
         do {
             try await host.start(runtime: second.runtime, endpoint: LoopbackEndpoint(port: 55_443), generation: 3)
@@ -417,7 +419,9 @@ final class ProcessIntegrationTests: XCTestCase {
     }
 
     private func waitForFile(_ url: URL, containing value: String) async throws {
-        let deadline = Date().addingTimeInterval(2)
+        // Generous deadline: passing runs return in milliseconds; the bound
+        // only limits how long a genuine failure can stall a loaded CI runner.
+        let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             if let text = try? String(contentsOf: url), text.contains(value) { return }
             try await Task.sleep(nanoseconds: 20_000_000)

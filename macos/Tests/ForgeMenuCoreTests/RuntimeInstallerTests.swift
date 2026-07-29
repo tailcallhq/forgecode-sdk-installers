@@ -32,11 +32,17 @@ final class RuntimeInstallerTests: XCTestCase {
     func testURLSessionNetworkThrottlesProgressToABoundedCallbackCount() async throws {
         let url = RuntimeReleaseURLs.origin.appendingPathComponent("bounded-progress")
         let data = Data(repeating: 7, count: 10_000)
+        // Progress throttling buckets by percentage of the byte stream, so the
+        // transport chunking is irrelevant to the assertions; 100-byte chunks
+        // keep multi-chunk delivery while avoiding 10k delegate round-trips.
+        let chunks = stride(from: 0, to: data.count, by: 100).map { start in
+            data.subdata(in: start..<min(start + 100, data.count))
+        }
         ScriptedURLProtocol.install([
             url: .response(
                 status: 200,
                 headers: ["Content-Length": "\(data.count)"],
-                chunks: data.map { Data([$0]) }
+                chunks: chunks
             )
         ])
         let progress = LockedValues<(Int64, Int64)>()
@@ -1599,8 +1605,8 @@ final class RuntimeInstallerTests: XCTestCase {
                 terminationGracePeriod: 0.05
             )
         }
-        for _ in 0..<500 where !FileManager.default.fileExists(atPath: pidURL.path) {
-            try await Task.sleep(nanoseconds: 1_000_000)
+        for _ in 0..<3_000 where !FileManager.default.fileExists(atPath: pidURL.path) {
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
         let pid = try XCTUnwrap(Int32(String(contentsOf: pidURL).trimmingCharacters(in: .whitespacesAndNewlines)))
         task.cancel()
@@ -1618,7 +1624,7 @@ final class RuntimeInstallerTests: XCTestCase {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let script = directory.url.appendingPathComponent("escape-pipes.sh")
-        try "#!/bin/sh\npython3 -c 'import os,time; os.setsid(); time.sleep(2)' &\nexit 0\n".write(
+        try "#!/bin/sh\npython3 -c 'import os,time; os.setsid(); time.sleep(10)' &\nexit 0\n".write(
             to: script,
             atomically: true,
             encoding: .utf8
@@ -1630,11 +1636,14 @@ final class RuntimeInstallerTests: XCTestCase {
             arguments: [],
             standardOutput: nil,
             maximumStandardOutputBytes: 1_024,
-            timeout: 1,
+            timeout: 30,
             terminationGracePeriod: 0.05
         )
         XCTAssertEqual(result.status, 0)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 0.75)
+        // The escaped descendant holds the pipes for 10s; returning well under
+        // that proves the runner does not wait for descendant pipe EOF, while
+        // leaving headroom for slow shared CI runners.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
     func testPOSIXProcessControlNeverSignalsAfterReap() {
@@ -1673,7 +1682,8 @@ final class RuntimeInstallerTests: XCTestCase {
             executable: URL(fileURLWithPath: "/usr/bin/yes"),
             arguments: [],
             standardOutput: output,
-            maximumStandardOutputBytes: 16_384
+            maximumStandardOutputBytes: 16_384,
+            terminationGracePeriod: 0.05
         )
         XCTAssertTrue(result.standardOutputLimitExceeded)
         let size = (try FileManager.default.attributesOfItem(atPath: output.path)[.size] as? NSNumber)?.intValue ?? 0
@@ -1801,7 +1811,10 @@ private func matchingDeveloperIDAuthenticationPolicy() -> RuntimeDeveloperIDAuth
 private func networkClient() -> URLSessionRuntimeNetworkClient {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [ScriptedURLProtocol.self]
-    return URLSessionRuntimeNetworkClient(configuration: configuration, requestTimeout: 0.2, resourceTimeout: 0.5)
+    // Timeout behavior is exercised by scripted URLError(.timedOut) failures,
+    // never by real wall-clock expiry, so these bounds stay generous: they only
+    // cap how long a misbehaving test can occupy a loaded CI runner.
+    return URLSessionRuntimeNetworkClient(configuration: configuration, requestTimeout: 10, resourceTimeout: 30)
 }
 
 private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
@@ -1816,7 +1829,6 @@ private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
     private static var plans: [URL: Plan] = [:]
     private static var started: Set<URL> = []
     private static var stopped: Set<URL> = []
-    private static var startWaiters: [URL: [CheckedContinuation<Void, Never>]] = [:]
     private let stateLock = NSLock()
     private var stoppedLocally = false
 
@@ -1829,19 +1841,17 @@ private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
             plans = [:]
             started = []
             stopped = []
-            startWaiters.values.flatMap { $0 }.forEach { $0.resume() }
-            startWaiters = [:]
         }
     }
 
     static func waitUntilStarted(_ url: URL) async {
-        if lock.withLock({ started.contains(url) }) { return }
-        await withCheckedContinuation { continuation in
-            lock.withLock {
-                if started.contains(url) { continuation.resume() }
-                else { startWaiters[url, default: []].append(continuation) }
-            }
+        // Bounded poll instead of an open-ended continuation: if the request
+        // never starts, the test must fail in seconds, not hang the runner.
+        for _ in 0..<3_000 {
+            if lock.withLock({ started.contains(url) }) { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
+        XCTFail("timed out waiting for a request to start: \(url)")
     }
 
     static func waitUntilStopped(_ url: URL) async -> Bool {
@@ -1862,8 +1872,6 @@ private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
         }
         let plan: Plan? = Self.lock.withLock {
             Self.started.insert(url)
-            let waiters = Self.startWaiters.removeValue(forKey: url) ?? []
-            waiters.forEach { $0.resume() }
             return Self.plans[url]
         }
         guard let plan else {
@@ -1889,6 +1897,13 @@ private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
                 headerFields: ["Location": destination.absoluteString]
             ) else { return }
             client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: destination), redirectResponse: response)
+            // Terminate this load explicitly. When the client follows the
+            // redirect it has already detached this protocol instance and
+            // ignores these messages; when it refuses (redirect limit or
+            // unsafe destination) the task completes immediately instead of
+            // stalling until the wall-clock request timeout fires.
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
         case .failure(let error):
             client?.urlProtocol(self, didFailWithError: error)
         case .hold:
