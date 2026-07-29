@@ -4,15 +4,27 @@ on:
   push:
     branches:
       - main
+  # Dry-run mode: PRs targeting main that carry the `test-release` label run
+  # the full release build, but upload the result as a workflow artifact
+  # instead of touching any GitHub release.
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
   workflow_dispatch: {}
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
     name: Detect macOS Changes
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,6 +46,7 @@ jobs:
 
   draft_release:
     name: Draft Release
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -54,21 +67,36 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build_release:
-    name: Build Signed DMG
+    name: Build Release DMG
     needs:
       - changes
       - draft_release
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.macos == 'true'
+    # Runs when:
+    #   - push to main touching macOS paths (or workflow_dispatch), after a
+    #     successful draft; or
+    #   - a PR into main labeled `test-release` (dry run, bypasses all gates).
+    if: >-
+      !cancelled()
+      && (needs.changes.result == 'success' || needs.changes.result == 'skipped')
+      && (
+        (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'test-release'))
+        || (github.event_name != 'pull_request'
+          && needs.draft_release.result == 'success'
+          && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.macos == 'true'))
+      )
     runs-on: macos-latest
     permissions:
       contents: read
     outputs:
-      built: ${{ steps.check.outputs.ready }}
+      mode: ${{ steps.mode.outputs.mode }}
+      appcast: ${{ steps.mode.outputs.appcast }}
+      dmg_file: ${{ steps.version.outputs.dmg_file }}
     env:
       NOTARY_PROFILE: ci-notary
     steps:
-      - name: Check signing secrets
-        id: check
+      - name: Determine signing mode
+        id: mode
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -79,19 +107,23 @@ jobs:
         run: |
           if [ -n "$MACOS_CERT_P12" ] && [ -n "$MACOS_CERT_PASSWORD" ] \
             && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ] \
-            && [ -n "$NOTARY_KEY" ] && [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            && [ -n "$NOTARY_KEY" ]; then
+            echo "mode=signed" >> "$GITHUB_OUTPUT"
           else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Signing or Sparkle update secrets are not configured; skipping signed release build."
+            echo "mode=unsigned" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple signing secrets are not configured; building an unsigned release."
+          fi
+          if [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "appcast=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "appcast=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SPARKLE_ED_PRIVATE_KEY is not configured; skipping appcast generation (auto-update feed)."
           fi
 
       - name: Checkout Code
-        if: steps.check.outputs.ready == 'true'
         uses: actions/checkout@v4
 
       - name: Cache Swift build
-        if: steps.check.outputs.ready == 'true'
         uses: actions/cache@v4
         with:
           path: macos/.build
@@ -100,14 +132,15 @@ jobs:
             swift-release-${{ runner.os }}-
 
       - name: Vendor Sparkle (pinned checksum)
-        if: steps.check.outputs.ready == 'true'
         working-directory: macos
         run: tools/fetch-sparkle.sh
 
       - name: Derive APP_VERSION from drafted tag
-        if: steps.check.outputs.ready == 'true'
+        id: version
         env:
-          TAG_NAME: ${{ needs.draft_release.outputs.tag_name }}
+          # Dry runs have no drafted release; use a fixed throwaway version.
+          TAG_NAME: ${{ github.event_name == 'pull_request' && 'v0.0.0' || needs.draft_release.outputs.tag_name }}
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -eu
           version="${TAG_NAME#v}"
@@ -117,9 +150,15 @@ jobs:
           # Sparkle compares CFBundleVersion, so the build number must increase
           # with every published release; the release semver satisfies that.
           echo "BUILD_NUMBER=$version" >> "$GITHUB_ENV"
+          # Unsigned builds carry an explicit suffix so nobody mistakes them
+          # for notarized artifacts; the manifest also records build_flavor.
+          suffix=""
+          [ "$MODE" = "signed" ] || suffix="-unsigned"
+          echo "DMG_NAME=ForgeCode-$version$suffix" >> "$GITHUB_ENV"
+          echo "dmg_file=ForgeCode-$version$suffix.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Import signing certificate
-        if: steps.check.outputs.ready == 'true'
+        if: steps.mode.outputs.mode == 'signed'
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -144,7 +183,7 @@ jobs:
           echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Store notarization credentials
-        if: steps.check.outputs.ready == 'true'
+        if: steps.mode.outputs.mode == 'signed'
         env:
           NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
@@ -160,27 +199,36 @@ jobs:
           rm -f "$key_file"
 
       - name: Build, sign, and notarize release
-        if: steps.check.outputs.ready == 'true'
+        if: steps.mode.outputs.mode == 'signed'
         working-directory: macos
         env:
           SIGNING_TEAM_ID: ${{ secrets.SIGNING_TEAM_ID }}
         run: scripts/release.sh
 
-      - name: Generate signed appcast
-        if: steps.check.outputs.ready == 'true'
+      - name: Build unsigned release
+        if: steps.mode.outputs.mode == 'unsigned'
+        working-directory: macos
+        env:
+          BUILD_FLAVOR: unsigned
+        run: scripts/package-unsigned.sh
+
+      - name: Generate appcast
+        if: steps.mode.outputs.appcast == 'true'
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-          TAG_NAME: ${{ needs.draft_release.outputs.tag_name }}
+          TAG_NAME: ${{ github.event_name == 'pull_request' && 'v0.0.0' || needs.draft_release.outputs.tag_name }}
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -eu
-          dmg="macos/dist/signed/ForgeCode-$APP_VERSION.dmg"
+          dist="macos/dist/$MODE"
+          dmg="$dist/$DMG_NAME.dmg"
           signature=$(echo "$SPARKLE_ED_PRIVATE_KEY" \
             | ./macos/Vendor/Sparkle/bin/sign_update --ed-key-file - -p "$dmg")
           length=$(stat -f %z "$dmg")
-          download_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/ForgeCode-$APP_VERSION.dmg"
-          minimum_macos=$(sed -n 's/^minimum_macos=//p' macos/dist/signed/manifest.txt)
+          download_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$DMG_NAME.dmg"
+          minimum_macos=$(sed -n 's/^minimum_macos=//p' "$dist/manifest.txt")
           published=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
-          cat > macos/dist/signed/appcast.xml <<XML
+          cat > "$dist/appcast.xml" <<XML
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
@@ -198,27 +246,48 @@ jobs:
           </rss>
           XML
           # Strip the heredoc indentation so the XML declaration is at column 0.
-          sed -i '' 's/^          //' macos/dist/signed/appcast.xml
-          xmllint --noout macos/dist/signed/appcast.xml
+          sed -i '' 's/^          //' "$dist/appcast.xml"
+          xmllint --noout "$dist/appcast.xml"
 
       - name: Stage release artifacts
-        if: steps.check.outputs.ready == 'true'
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -eu
+          dist="macos/dist/$MODE"
           rm -rf release-artifacts
           mkdir -p release-artifacts
-          cp "macos/dist/signed/ForgeCode-$APP_VERSION.dmg" release-artifacts/
-          cp macos/dist/signed/manifest.txt release-artifacts/
-          cp macos/dist/signed/SHA256SUMS release-artifacts/
-          cp macos/dist/signed/appcast.xml release-artifacts/
+          cp "$dist/$DMG_NAME.dmg" release-artifacts/
+          cp "$dist/manifest.txt" release-artifacts/
+          cp "$dist/SHA256SUMS" release-artifacts/
+          if [ -f "$dist/appcast.xml" ]; then
+            cp "$dist/appcast.xml" release-artifacts/
+          fi
 
       - name: Upload staged artifacts
-        if: steps.check.outputs.ready == 'true'
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: release-macos
           path: release-artifacts/*
           if-no-files-found: error
+
+      - name: Report dry-run artifact
+        if: github.event_name == 'pull_request'
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          echo "::notice::Release dry run complete ($MODE mode); artifact: $ARTIFACT_URL"
+          {
+            echo "## Release dry run"
+            echo ""
+            echo "- Signing mode: \`$MODE\`"
+            echo "- DMG: \`$DMG_NAME.dmg\`"
+            echo "- Artifact: $ARTIFACT_URL"
+            echo ""
+            echo "No release was created or modified."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up keychain
         if: always()
@@ -232,12 +301,18 @@ jobs:
     needs:
       - draft_release
       - build_release
-    if: needs.draft_release.result == 'success' && needs.build_release.result == 'success' && needs.build_release.outputs.built == 'true'
+    if: >-
+      !cancelled()
+      && github.event_name != 'pull_request'
+      && needs.draft_release.result == 'success'
+      && needs.build_release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       TAG_NAME: ${{ needs.draft_release.outputs.tag_name }}
+      DMG_FILE: ${{ needs.build_release.outputs.dmg_file }}
+      HAS_APPCAST: ${{ needs.build_release.outputs.appcast }}
     steps:
       - name: Download staged artifacts
         uses: actions/download-artifact@v4
@@ -249,13 +324,14 @@ jobs:
         run: |
           set -euo pipefail
           cd release-artifacts
-          version="${TAG_NAME#v}"
           expected=(
-            "ForgeCode-$version.dmg"
+            "$DMG_FILE"
             "manifest.txt"
             "SHA256SUMS"
-            "appcast.xml"
           )
+          if [ "$HAS_APPCAST" = "true" ]; then
+            expected+=("appcast.xml")
+          fi
           for file in "${expected[@]}"; do
             test -f "$file" || { echo "missing expected artifact: $file" >&2; exit 1; }
           done
