@@ -26,8 +26,30 @@ public enum ConversationStreamState: Equatable, Sendable {
     case reconnecting(attempt: Int, delay: TimeInterval)
 }
 
+public enum RuntimeInstallationPhase: Equatable, Sendable {
+    case resolving
+    case downloading(progress: Double)
+    case verifying
+    case installing
+    case ready
+
+    public var boundedDownloadProgress: Double? {
+        guard case .downloading(let progress) = self else { return nil }
+        return min(1, max(0, progress))
+    }
+}
+
+public enum RuntimeInstallationFailure: Equatable, Sendable {
+    case download
+    case verification
+    case filesystem(RuntimeFilesystemFailure)
+    case other
+}
+
 public enum ServicePhase: Equatable, Sendable {
     case disabled
+    case installing(RuntimeInstallationPhase)
+    case installationFailed(RuntimeInstallationFailure)
     case starting
     case ready
     case restarting(attempt: Int, delay: TimeInterval)
@@ -36,6 +58,9 @@ public enum ServicePhase: Equatable, Sendable {
 }
 
 public struct ServiceSnapshot: Equatable, Sendable {
+    /// Monotonically increases each time the supervisor publishes a snapshot.
+    /// Consumers must ignore revisions older than the newest one they applied.
+    public var revision: UInt64
     public var phase: ServicePhase
     public var endpoint: LoopbackEndpoint?
     public var activeConversations: [ActiveConversation]
@@ -48,6 +73,7 @@ public struct ServiceSnapshot: Equatable, Sendable {
     public var appVersion: String?
 
     public init(
+        revision: UInt64 = 0,
         phase: ServicePhase = .stopped,
         endpoint: LoopbackEndpoint? = nil,
         activeConversations: [ActiveConversation] = [],
@@ -56,6 +82,7 @@ public struct ServiceSnapshot: Equatable, Sendable {
         sdkVersion: String? = nil,
         appVersion: String? = nil
     ) {
+        self.revision = revision
         self.phase = phase
         self.endpoint = endpoint
         self.activeConversations = activeConversations
@@ -63,6 +90,22 @@ public struct ServiceSnapshot: Equatable, Sendable {
         self.streamError = streamError
         self.sdkVersion = sdkVersion
         self.appVersion = appVersion
+    }
+}
+
+/// Small value-type gate shared by UI consumers and tests so asynchronous
+/// callback hops cannot apply an older service snapshot after a newer one.
+public struct ServiceSnapshotRevisionGate: Sendable {
+    public private(set) var latestRevision: UInt64?
+
+    public init(latestRevision: UInt64? = nil) {
+        self.latestRevision = latestRevision
+    }
+
+    public mutating func accept(_ snapshot: ServiceSnapshot) -> Bool {
+        if let latestRevision, snapshot.revision <= latestRevision { return false }
+        latestRevision = snapshot.revision
+        return true
     }
 }
 
@@ -74,6 +117,7 @@ public enum ForgeCoreError: LocalizedError, Equatable {
     case streamInterrupted(String)
     case invalidConsoleOrigin(String)
     case missingExecutable(String)
+    case processAlreadyRunning
     case processLaunch(String)
     case portAllocation(String)
 
@@ -92,7 +136,9 @@ public enum ForgeCoreError: LocalizedError, Equatable {
         case .invalidConsoleOrigin(let value):
             return "The ForgeCode console origin is invalid: \(value)"
         case .missingExecutable(let path):
-            return "The bundled forge3 helper is missing or not executable at \(path). Reinstall the app."
+            return "The selected forge3 runtime is missing or not executable at \(path). Try reinstalling the runtime."
+        case .processAlreadyRunning:
+            return "The ForgeCode service process is already running."
         case .processLaunch(let message):
             return "Could not start the ForgeCode service: \(message)"
         case .portAllocation(let message):

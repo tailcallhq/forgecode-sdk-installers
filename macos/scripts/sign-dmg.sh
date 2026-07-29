@@ -15,5 +15,4 @@ if [ -n "${SIGNING_TEAM_ID:-}" ]; then
   actual_team=$(codesign -dv --verbose=4 "$DMG_PATH" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
   [ "$actual_team" = "$SIGNING_TEAM_ID" ] || fail "signed DMG team mismatch: expected $SIGNING_TEAM_ID, got ${actual_team:-none}"
 fi
-write_manifest
-generate_checksums
+finalize_release_metadata

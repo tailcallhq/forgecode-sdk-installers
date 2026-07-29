@@ -8,21 +8,15 @@ let package = Package(
     ],
     products: [
         .library(name: "ForgeMenuCore", targets: ["ForgeMenuCore"]),
-        .executable(name: "ForgeMenuBar", targets: ["ForgeMenuBar"])
+        .executable(name: "ForgeMenuBar", targets: ["ForgeMenuBar"]),
+        .executable(name: "ForgeRuntimeSmokeHelper", targets: ["ForgeRuntimeSmokeHelper"]),
+        .executable(name: "ForgeRuntimeLeaseTestHelper", targets: ["ForgeRuntimeLeaseTestHelper"])
     ],
-    dependencies: [
-        // Semantic version parsing and comparison, mirroring the `semver`
-        // crate the SDK uses in svc-update. This is SwiftPM's own
-        // Version.swift extracted as a standalone package, so it matches the
-        // semantics Swift tooling already applies. Apache-2.0, like this repo.
-        .package(url: "https://github.com/mxcl/Version.git", from: "2.0.0")
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "ForgeMenuCore",
-            dependencies: [
-                .product(name: "Version", package: "Version")
-            ],
+            dependencies: [],
             path: "Sources/ForgeMenuCore"
         ),
         .executableTarget(
@@ -33,6 +27,16 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ServiceManagement")
             ]
+        ),
+        .executableTarget(
+            name: "ForgeRuntimeSmokeHelper",
+            dependencies: ["ForgeMenuCore"],
+            path: "Sources/ForgeRuntimeSmokeHelper"
+        ),
+        .executableTarget(
+            name: "ForgeRuntimeLeaseTestHelper",
+            dependencies: ["ForgeMenuCore"],
+            path: "Sources/ForgeRuntimeLeaseTestHelper"
         ),
         .testTarget(
             name: "ForgeMenuCoreTests",

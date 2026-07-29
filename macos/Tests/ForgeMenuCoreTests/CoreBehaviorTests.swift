@@ -128,6 +128,15 @@ final class CoreBehaviorTests: XCTestCase {
         XCTAssertNil(sanitized["OPENAI_API_KEY"])
     }
 
+    func testSnapshotRevisionGateRejectsDuplicateAndOutOfOrderDelivery() {
+        var gate = ServiceSnapshotRevisionGate()
+        XCTAssertTrue(gate.accept(ServiceSnapshot(revision: 4, phase: .ready)))
+        XCTAssertFalse(gate.accept(ServiceSnapshot(revision: 3, phase: .starting)))
+        XCTAssertFalse(gate.accept(ServiceSnapshot(revision: 4, phase: .failed("duplicate"))))
+        XCTAssertTrue(gate.accept(ServiceSnapshot(revision: 5, phase: .disabled)))
+        XCTAssertEqual(gate.latestRevision, 5)
+    }
+
     func testLoopbackEndpointUsesExactAddressAndURL() {
         let endpoint = LoopbackEndpoint(port: 54_321)
         XCTAssertEqual(endpoint.address, "127.0.0.1:54321")

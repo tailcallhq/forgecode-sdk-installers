@@ -6,8 +6,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 [ "$BUILD_FLAVOR" = "unsigned" ] || fail "package-unsigned.sh requires BUILD_FLAVOR=unsigned"
 packaging_preflight
+sh "$SCRIPT_DIR/test-packaging.sh"
 run_tests
-sh "$SCRIPT_DIR/fetch-forge3.sh"
 sh "$SCRIPT_DIR/assemble-app.sh"
 sh "$SCRIPT_DIR/verify-release.sh"
 sh "$SCRIPT_DIR/create-dmg.sh"

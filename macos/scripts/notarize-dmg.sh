@@ -22,5 +22,4 @@ fi
 xcrun stapler staple "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
 spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
-write_manifest
-generate_checksums
+finalize_release_metadata

@@ -7,28 +7,28 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 require_command plutil
 require_command lipo
 require_command python3
+require_command codesign
 
 app_binary=${APP_BINARY:-}
-helper_binary=${FORGE3_BINARY:-}
 assets_dir=${ASSETS_DIR:-}
 
 [ -n "$app_binary" ] || app_binary=$(sh "$SCRIPT_DIR/build-universal.sh" | tail -n 1)
-[ -n "$helper_binary" ] || helper_binary=$(sh "$SCRIPT_DIR/build-helper.sh" | tail -n 1)
 [ -n "$assets_dir" ] || assets_dir=$(sh "$SCRIPT_DIR/generate-assets.sh" | tail -n 1)
 
 [ -x "$app_binary" ] || fail "app executable is missing: $app_binary"
-[ -x "$helper_binary" ] || fail "forge3 helper is missing: $helper_binary"
 [ -f "$assets_dir/AppIcon.icns" ] || fail "AppIcon.icns is missing: $assets_dir/AppIcon.icns"
 [ -f "$INFO_PLIST_TEMPLATE" ] || fail "Info.plist template is missing"
 
-safe_remove "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Resources"
-install -m 0755 "$app_binary" "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
-install -m 0755 "$helper_binary" "$APP_BUNDLE/Contents/Helpers/$HELPER_EXECUTABLE"
-install -m 0644 "$assets_dir/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+staging="$DIST_DIR/.$APP_NAME.app.staging.$$"
+safe_remove "$staging"
+cleanup() { safe_remove "$staging"; }
+trap cleanup EXIT HUP INT TERM
+mkdir -p "$staging/Contents/MacOS" "$staging/Contents/Resources"
+install -m 0755 "$app_binary" "$staging/Contents/MacOS/$APP_EXECUTABLE"
+install -m 0644 "$assets_dir/AppIcon.icns" "$staging/Contents/Resources/AppIcon.icns"
 
-python3 - "$INFO_PLIST_TEMPLATE" "$APP_BUNDLE/Contents/Info.plist" \
+python3 - "$INFO_PLIST_TEMPLATE" "$staging/Contents/Info.plist" \
   "$APP_NAME" "$APP_EXECUTABLE" "$BUNDLE_ID" "$APP_VERSION" "$BUILD_NUMBER" "$MINIMUM_MACOS_VERSION" <<'PY'
 import plistlib
 import sys
@@ -46,15 +46,21 @@ plist["LSMinimumSystemVersion"] = minimum
 with open(destination, "wb") as handle:
     plistlib.dump(plist, handle, fmt=plistlib.FMT_XML, sort_keys=False)
 PY
-plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
-[ "$(plist_value "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString)" = "$APP_VERSION" ] || fail "app version substitution failed"
-[ "$(plist_value "$APP_BUNDLE/Contents/Info.plist" CFBundleVersion)" = "$BUILD_NUMBER" ] || fail "build number substitution failed"
+printf 'APPL????' > "$staging/Contents/PkgInfo"
 
-# Finder treats this file as a conventional bundle marker.
-printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
+validate_macho "$staging/Contents/MacOS/$APP_EXECUTABLE" arm64 x86_64
+verify_info_plist_and_resources "$staging"
+assert_no_packaged_runtime "$staging" "staged app bundle"
 
-validate_macho "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE" arm64 x86_64
-validate_macho "$APP_BUNDLE/Contents/Helpers/$HELPER_EXECUTABLE" arm64 x86_64
+# Every assembled app is sealed before publication. The unsigned artifact keeps
+# this ad-hoc seal; the signed release path deliberately replaces it with the
+# configured Developer ID identity before notarization.
+ad_hoc_sign_app "$staging"
+verify_app_inventory "$staging"
+
+safe_remove "$APP_BUNDLE" "$DMG_PATH" "$MANIFEST_PATH" "$CHECKSUMS_PATH"
+mv "$staging" "$APP_BUNDLE"
+trap - EXIT HUP INT TERM
 write_manifest
-safe_remove "$CHECKSUMS_PATH"
+verify_manifest
 printf '%s\n' "$APP_BUNDLE"

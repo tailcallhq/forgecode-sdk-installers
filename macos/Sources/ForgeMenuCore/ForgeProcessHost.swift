@@ -2,59 +2,100 @@ import Darwin
 import Foundation
 
 public protocol ForgeProcessHosting: AnyObject, Sendable {
-    var onExit: (@Sendable (_ status: Int32, _ runtime: TimeInterval) -> Void)? { get set }
-    func start(endpoint: LoopbackEndpoint) async throws
+    var onExit: (@Sendable (_ status: Int32, _ runtime: TimeInterval, _ generation: UInt64) -> Void)? { get set }
+    func start(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) async throws
     func stop(gracePeriod: TimeInterval) async
+}
+
+public protocol InstalledRuntimeIdentityValidating: Sendable {
+    func validate(_ runtime: InstalledRuntime) throws
+}
+
+public struct InstalledRuntimeIdentityValidator: InstalledRuntimeIdentityValidating {
+    private let executableValidator: any RuntimeExecutableValidating
+
+    public init(executableValidator: any RuntimeExecutableValidating = MachORuntimeValidator()) {
+        self.executableValidator = executableValidator
+    }
+
+    public func validate(_ runtime: InstalledRuntime) throws {
+        guard runtime.architecture == .native else {
+            throw RuntimeInstallerError.wrongArchitecture(
+                expected: .native,
+                actual: runtime.architecture.rawValue
+            )
+        }
+        try runtime.validateExecutableIdentity()
+        try executableValidator.validate(
+            executableURL: runtime.executableURL.standardizedFileURL,
+            expectedArchitecture: runtime.architecture
+        )
+        try runtime.validateExecutableIdentity()
+    }
 }
 
 public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     public struct Configuration: Sendable {
-        public let executableURL: URL
         public let environment: [String: String]
         public let logURL: URL
         public let maximumLogBytes: UInt64
         public let retainedLogFiles: Int
         public let maximumBufferedOutputBytes: Int
+        public let launchHooks: RuntimePinnedLaunchHooks
 
         public init(
-            executableURL: URL,
             environment: [String: String] = [:],
             logURL: URL,
             maximumLogBytes: UInt64 = 5_000_000,
             retainedLogFiles: Int = 3,
-            maximumBufferedOutputBytes: Int = 256_000
+            maximumBufferedOutputBytes: Int = 256_000,
+            launchHooks: RuntimePinnedLaunchHooks = RuntimePinnedLaunchHooks()
         ) {
-            self.executableURL = executableURL
             self.environment = environment
             self.logURL = logURL
             self.maximumLogBytes = maximumLogBytes
             self.retainedLogFiles = retainedLogFiles
             self.maximumBufferedOutputBytes = max(4_096, maximumBufferedOutputBytes)
+            self.launchHooks = launchHooks
         }
     }
 
-    public var onExit: (@Sendable (_ status: Int32, _ runtime: TimeInterval) -> Void)? {
+    public var onExit: (@Sendable (_ status: Int32, _ runtime: TimeInterval, _ generation: UInt64) -> Void)? {
         get { queue.sync { exitHandler } }
         set { queue.sync { exitHandler = newValue } }
     }
 
     private let configuration: Configuration
     private let logger: AppLogger
+    private let runtimeIdentityValidator: any InstalledRuntimeIdentityValidating
+    private let lease: RuntimeStoreLease?
     private let queue = DispatchQueue(label: "dev.forgecode.menubar.process-host")
     private let logWriter: RotatingLogWriter
-    private var exitHandler: (@Sendable (_ status: Int32, _ runtime: TimeInterval) -> Void)?
+    private var exitHandler: (@Sendable (_ status: Int32, _ runtime: TimeInterval, _ generation: UInt64) -> Void)?
     private var pid: pid_t = 0
     private var startedAt: Date?
+    private var lifecycleGeneration: UInt64 = 0
+    private var lifecycleToken: UInt64 = 0
+    private var nextLifecycleToken: UInt64 = 0
     private var stopping = false
+    private var stopEscalation: DispatchWorkItem?
     private var processSource: DispatchSourceProcess?
     private var outputSource: DispatchSourceRead?
     private var outputDescriptor: Int32 = -1
     private var outputBuffer = Data()
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+    private var executionLeaseToken: RuntimeStoreLease.Token?
 
-    public init(configuration: Configuration, logger: AppLogger = .shared) {
+    public init(
+        configuration: Configuration,
+        logger: AppLogger = .shared,
+        runtimeIdentityValidator: any InstalledRuntimeIdentityValidating = InstalledRuntimeIdentityValidator(),
+        lease: RuntimeStoreLease? = nil
+    ) {
         self.configuration = configuration
         self.logger = logger
+        self.runtimeIdentityValidator = runtimeIdentityValidator
+        self.lease = lease
         self.logWriter = RotatingLogWriter(
             fileManager: .default,
             logURL: configuration.logURL,
@@ -63,11 +104,11 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         )
     }
 
-    public func start(endpoint: LoopbackEndpoint) async throws {
+    public func start(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) async throws {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    try self.startLocked(endpoint: endpoint)
+                    try self.startLocked(runtime: runtime, endpoint: endpoint, generation: generation)
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -88,41 +129,72 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
                 guard !self.stopping else { return }
                 self.stopping = true
                 let expectedPID = self.pid
+                let expectedToken = self.lifecycleToken
                 self.logger.info("Stopping forge3 process group \(expectedPID)")
-                kill(-expectedPID, SIGTERM)
+                _ = kill(-expectedPID, SIGTERM)
 
-                self.queue.asyncAfter(deadline: .now() + max(0, gracePeriod)) {
-                    guard self.pid == expectedPID else { return }
+                let escalation = DispatchWorkItem { [weak self] in
+                    guard let self,
+                          self.pid == expectedPID,
+                          self.lifecycleToken == expectedToken,
+                          self.stopping
+                    else { return }
                     self.logger.warning("forge3 did not terminate within \(String(format: "%.1f", gracePeriod)) seconds; sending SIGKILL")
-                    kill(-expectedPID, SIGKILL)
-                    // SIGKILL cannot be ignored. Reap synchronously here so a
-                    // caller can never start a replacement while the old child
-                    // or its process group is still alive.
-                    self.reapExitedProcessLocked(expectedPID)
+                    _ = kill(-expectedPID, SIGKILL)
+                    guard self.pid == expectedPID,
+                          self.lifecycleToken == expectedToken,
+                          self.stopping
+                    else { return }
+                    self.reapExitedProcessLocked(expectedPID, lifecycleToken: expectedToken)
                 }
+                self.stopEscalation?.cancel()
+                self.stopEscalation = escalation
+                self.queue.asyncAfter(deadline: .now() + max(0, gracePeriod), execute: escalation)
             }
         }
     }
 
-    private func startLocked(endpoint: LoopbackEndpoint) throws {
-        guard pid == 0 else { return }
-        guard FileManager.default.isExecutableFile(atPath: configuration.executableURL.path) else {
-            throw ForgeCoreError.missingExecutable(configuration.executableURL.path)
+    private func startLocked(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) throws {
+        guard pid == 0 else { throw ForgeCoreError.processAlreadyRunning }
+        try runtimeIdentityValidator.validate(runtime)
+        guard let executableIdentity = runtime.executableIdentity else {
+            throw RuntimeInstallerError.untrustedStoreItem("runtime executable identity is unavailable")
+        }
+        let executionLease = try lease?.acquire(.sharedExecution)
+        var retainExecutionLease = false
+        defer {
+            if !retainExecutionLease { executionLease?.release() }
+        }
+        let selectedExecutable = runtime.executableURL.standardizedFileURL
+        let pinnedExecutable = try RuntimePinnedExecutable(
+            url: selectedExecutable,
+            expectedIdentity: executableIdentity
+        )
+        defer { pinnedExecutable.close() }
+        guard FileManager.default.isExecutableFile(atPath: selectedExecutable.path) else {
+            throw ForgeCoreError.missingExecutable(selectedExecutable.path)
         }
 
         var descriptors = [Int32](repeating: 0, count: 2)
         guard pipe(&descriptors) == 0 else {
             throw ForgeCoreError.processLaunch("could not create logging pipe: \(String(cString: strerror(errno)))")
         }
-        let readDescriptor = descriptors[0]
-        let writeDescriptor = descriptors[1]
+        var readDescriptor = descriptors[0]
+        var writeDescriptor = descriptors[1]
+        defer {
+            if readDescriptor >= 0 { close(readDescriptor) }
+            if writeDescriptor >= 0 { close(writeDescriptor) }
+        }
         var actions: posix_spawn_file_actions_t?
         guard posix_spawn_file_actions_init(&actions) == 0 else {
-            close(readDescriptor)
-            close(writeDescriptor)
             throw ForgeCoreError.processLaunch("could not initialize process file actions")
         }
         defer { posix_spawn_file_actions_destroy(&actions) }
+        try pinnedExecutable.addDirectoryActions(to: &actions)
+        try checkPOSIX(
+            posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
+            operation: "redirect stdin"
+        )
         try checkPOSIX(
             posix_spawn_file_actions_adddup2(&actions, writeDescriptor, STDOUT_FILENO),
             operation: "redirect stdout"
@@ -142,8 +214,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
 
         var attributes: posix_spawnattr_t?
         guard posix_spawnattr_init(&attributes) == 0 else {
-            close(readDescriptor)
-            close(writeDescriptor)
             throw ForgeCoreError.processLaunch("could not initialize process attributes")
         }
         defer { posix_spawnattr_destroy(&attributes) }
@@ -157,7 +227,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         )
 
         let arguments = [
-            configuration.executableURL.path,
+            pinnedExecutable.basename,
             "--log-format", "json",
             "ws", "--addr", endpoint.address
         ]
@@ -168,38 +238,49 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         let environmentStrings = environment.keys.sorted().compactMap { key in
             environment[key].map { "\(key)=\($0)" }
         }
-        let argv = arguments.map { strdup($0) } + [nil]
-        let envp = environmentStrings.map { strdup($0) } + [nil]
+        var argv = arguments.map { strdup($0) } + [nil]
+        var envp = environmentStrings.map { strdup($0) } + [nil]
         defer {
             for pointer in argv where pointer != nil { free(pointer) }
             for pointer in envp where pointer != nil { free(pointer) }
         }
 
         var spawnedPID: pid_t = 0
-        let result = posix_spawn(
-            &spawnedPID,
-            configuration.executableURL.path,
-            &actions,
-            &attributes,
-            argv,
-            envp
+        let result = try pinnedExecutable.spawn(
+            pid: &spawnedPID,
+            actions: &actions,
+            attributes: &attributes,
+            argv: &argv,
+            envp: &envp,
+            hooks: configuration.launchHooks
         )
         close(writeDescriptor)
+        writeDescriptor = -1
         guard result == 0 else {
-            close(readDescriptor)
             throw ForgeCoreError.processLaunch(String(cString: strerror(result)))
         }
 
         pid = spawnedPID
+        executionLeaseToken = executionLease
+        retainExecutionLease = true
         startedAt = Date()
+        lifecycleGeneration = generation
+        nextLifecycleToken &+= 1
+        lifecycleToken = nextLifecycleToken
+        let processToken = lifecycleToken
         stopping = false
+        stopEscalation?.cancel()
+        stopEscalation = nil
         beginReadingOutputLocked(descriptor: readDescriptor)
+        readDescriptor = -1
 
         let source = DispatchSource.makeProcessSource(identifier: spawnedPID, eventMask: .exit, queue: queue)
-        source.setEventHandler { [weak self] in self?.reapExitedProcessLocked(spawnedPID) }
+        source.setEventHandler { [weak self] in
+            self?.reapExitedProcessLocked(spawnedPID, lifecycleToken: processToken)
+        }
         processSource = source
         source.resume()
-        logger.info("Started forge3 process group \(spawnedPID) on private loopback port \(endpoint.port)")
+        logger.info("Started forge3 process group \(spawnedPID) from \(selectedExecutable.path) on private loopback port \(endpoint.port)")
     }
 
     private func beginReadingOutputLocked(descriptor: Int32) {
@@ -261,8 +342,13 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
     }
 
-    private func reapExitedProcessLocked(_ expectedPID: pid_t) {
-        guard pid == expectedPID else { return }
+    private func reapExitedProcessLocked(_ expectedPID: pid_t, lifecycleToken expectedToken: UInt64) {
+        guard pid == expectedPID, lifecycleToken == expectedToken else { return }
+        stopEscalation?.cancel()
+        stopEscalation = nil
+        // The child has not been reaped yet, so its PID cannot be reused. This
+        // is the final safe point to clean up any descendants in its group.
+        _ = kill(-expectedPID, SIGKILL)
         var status: Int32 = 0
         var waitResult: pid_t
         repeat {
@@ -272,10 +358,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             logger.error("Could not reap forge3 process \(expectedPID): \(String(cString: strerror(errno)))")
             return
         }
-
-        // The direct child is reaped, but an extension may have left descendants
-        // in the process group. Best-effort group cleanup avoids orphan helpers.
-        _ = kill(-expectedPID, SIGKILL)
 
         let signal = status & 0x7f
         let exitStatus: Int32
@@ -288,6 +370,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
 
         let runtime = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let exitedGeneration = lifecycleGeneration
         let intentional = stopping
         processSource?.cancel()
         processSource = nil
@@ -297,12 +380,16 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         outputDescriptor = -1
         flushRemainingOutputLocked()
         pid = 0
+        executionLeaseToken?.release()
+        executionLeaseToken = nil
         startedAt = nil
+        lifecycleGeneration = 0
+        lifecycleToken = 0
         stopping = false
         finishStopWaitersLocked()
         logger.info("forge3 exited with status \(exitStatus) after \(String(format: "%.1f", runtime)) seconds")
         if !intentional {
-            exitHandler?(exitStatus, runtime)
+            exitHandler?(exitStatus, runtime, exitedGeneration)
         }
     }
 
