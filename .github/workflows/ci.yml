@@ -8,13 +8,6 @@ on:
       - "macos/**"
       - "versions.sh"
       - ".github/workflows/ci.yml"
-  push:
-    branches:
-      - main
-    paths:
-      - "macos/**"
-      - "versions.sh"
-      - ".github/workflows/ci.yml"
   workflow_dispatch: {}
 
 concurrency:
