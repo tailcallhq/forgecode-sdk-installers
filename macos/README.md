@@ -1,12 +1,18 @@
 # ForgeCode for macOS
 
-A menu-bar-only AppKit application that supervises a local ForgeCode WebSocket service and shows currently running root conversations in a compact native popover. The package targets macOS 13 or later and is SwiftPM-based with no remote package dependencies. The app and DMG contain no service-runtime binary.
+A menu-bar-only AppKit application that supervises a local ForgeCode WebSocket service and shows currently running root conversations in a compact native popover. The package targets macOS 13 or later and is SwiftPM-based with no remote package dependencies; the only binary dependency is the Sparkle 2 updater framework, vendored locally as an XCFramework. The app and DMG contain no service-runtime binary.
 
 ## Prerequisites
 
-Building and testing the app needs Xcode 15 or later (Swift 5.9, macOS 13 SDK). Semantic-version parsing and comparison are implemented locally, and the package has no dependencies or `Package.resolved` remote pins, so a clean Swift build and packaging run do not require dependency-network access.
+Building and testing the app needs Xcode 15 or later (Swift 5.9, macOS 13 SDK). Semantic-version parsing and comparison are implemented locally, and the package has no remote dependencies or `Package.resolved` remote pins. Before the first build, vendor the Sparkle updater framework once:
 
-Packaging uses only the local Swift package, packaging templates, and generated image assets. It does not download the service runtime, use a runtime cache or `Vendor` directory, or require runtime-repository credentials. A source scanner rejects remote SwiftPM pins, URLs, and explicit network-capable commands in packaging shell scripts. Packaging also unsets `FORGE_LIVE_RUNTIME_SMOKE` before tests and builds so a developer environment cannot turn a release build into a live runtime download.
+```sh
+tools/fetch-sparkle.sh
+```
+
+The script downloads a version- and SHA-256-pinned Sparkle release archive into `Vendor/Sparkle/` (gitignored) and is the only network step in the entire local workflow; after it completes, clean Swift builds and packaging runs require no dependency-network access.
+
+Packaging uses only the local Swift package, the vendored Sparkle framework, packaging templates, and generated image assets. It does not download the service runtime, use the developer runtime cache, or require runtime-repository credentials. A source scanner rejects remote SwiftPM pins, URLs, and explicit network-capable commands in packaging shell scripts; the checksum-pinned Sparkle fetch deliberately lives outside `scripts/` in `tools/` so packaging itself stays offline. The assembled app embeds a slimmed `Sparkle.framework` (no XPC services, headers, or modules — the app is not sandboxed) at `Contents/Frameworks`, and bundle verification derives its exact expected Sparkle inventory, including framework symlinks and executable members, from the vendored copy. Sparkle checks the appcast feed published with each GitHub release (`SUFeedURL`) and verifies downloaded updates against the EdDSA public key in `SUPublicEDKey` plus the Developer ID signature. Packaging also unsets `FORGE_LIVE_RUNTIME_SMOKE` before tests and builds so a developer environment cannot turn a release build into a live runtime download.
 
 ## Versioning
 

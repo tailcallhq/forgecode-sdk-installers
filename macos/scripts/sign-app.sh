@@ -14,8 +14,18 @@ team_id=${SIGNING_TEAM_ID:-}
 plutil -lint "$ENTITLEMENTS_FILE" >/dev/null
 security find-identity -v -p codesigning | grep -F "$identity" >/dev/null || fail "configured signing identity is not available: $identity"
 
-# Sign the executable explicitly, then seal the outer bundle. Avoid --deep so
-# any future nested code must be added deliberately and remains visible.
+# Sign nested code inside-out first, then the executable, then seal the outer
+# bundle. Avoid --deep so any future nested code must be added deliberately and
+# remains visible. Sparkle's components deliberately do not receive the app's
+# entitlements; they need only the hardened runtime for notarization.
+sparkle_framework="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+[ -d "$sparkle_framework" ] || fail "embedded Sparkle framework is missing; run scripts/assemble-app.sh"
+codesign --force --timestamp --options runtime --sign "$identity" \
+  "$sparkle_framework/Versions/B/Updater.app"
+codesign --force --timestamp --options runtime --sign "$identity" \
+  "$sparkle_framework/Versions/B/Autoupdate"
+codesign --force --timestamp --options runtime --sign "$identity" \
+  "$sparkle_framework"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS_FILE" --sign "$identity" \
   "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS_FILE" --sign "$identity" \

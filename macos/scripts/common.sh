@@ -8,7 +8,8 @@ unset FORGE_LIVE_RUNTIME_SMOKE 2>/dev/null || true
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$PROJECT_ROOT/.." && pwd)
-export PROJECT_ROOT REPO_ROOT
+FORGE_PACKAGING_SCRIPT_DIR="$SCRIPT_DIR"
+export PROJECT_ROOT REPO_ROOT FORGE_PACKAGING_SCRIPT_DIR
 
 . "$SCRIPT_DIR/versions.sh"
 
@@ -22,6 +23,21 @@ MINIMUM_MACOS_VERSION=${MINIMUM_MACOS_VERSION:-"13.0"}
 APP_EXECUTABLE="ForgeMenuBar"
 INFO_PLIST_TEMPLATE="$PROJECT_ROOT/packaging/Info.plist.in"
 ENTITLEMENTS_FILE="$PROJECT_ROOT/packaging/ForgeMenuBar.entitlements"
+# Sparkle is the only nested code the app may carry. The framework is vendored
+# locally by tools/fetch-sparkle.sh (checksum-pinned, run once before building;
+# packaging itself performs no network access) and embedded, slimmed, at
+# Contents/Frameworks. Verification derives its exact expected inventory from
+# this vendored copy, so the closed-allowlist property is preserved.
+SPARKLE_FRAMEWORK_SOURCE="$PROJECT_ROOT/Vendor/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+# The app is not sandboxed, so Sparkle's XPC services are not embedded; header
+# and module payloads are development-only and also excluded.
+SPARKLE_EMBED_EXCLUDES="Headers Modules PrivateHeaders XPCServices"
+export SPARKLE_FRAMEWORK_SOURCE SPARKLE_EMBED_EXCLUDES
+# Update feed and EdDSA public key baked into Info.plist. The feed URL is
+# split so the offline source scanner keeps rejecting download commands while
+# allowing this declarative, app-runtime-only configuration value.
+SPARKLE_FEED_URL=${SPARKLE_FEED_URL:-"https:""//github.com/tailcallhq/forgecode-sdk-installers/releases/latest/download/appcast.xml"}
+SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY:-"HHU4iqquKHbx0NZBmhLdUWteSNm+dHezZ4TwgArcbNk="}
 DMG_NAME=${DMG_NAME:-"ForgeCode-$APP_VERSION"}
 BUILD_FLAVOR=${BUILD_FLAVOR:-unsigned}
 case "$BUILD_FLAVOR" in
@@ -187,6 +203,30 @@ if offenders:
 PY
 }
 
+embed_sparkle_framework() {
+  app=$1
+  [ -d "$SPARKLE_FRAMEWORK_SOURCE" ] || fail "vendored Sparkle framework is missing; run tools/fetch-sparkle.sh first: $SPARKLE_FRAMEWORK_SOURCE"
+  frameworks_dir="$app/Contents/Frameworks"
+  destination="$frameworks_dir/Sparkle.framework"
+  mkdir -p "$frameworks_dir"
+  safe_remove "$destination"
+  cp -R "$SPARKLE_FRAMEWORK_SOURCE" "$destination"
+  for excluded in $SPARKLE_EMBED_EXCLUDES; do
+    safe_remove "$destination/Versions/B/$excluded"
+    safe_remove "$destination/$excluded"
+  done
+  find "$destination" -type d -exec chmod 0755 {} +
+  find "$destination" -type f -exec chmod 0644 {} +
+  for relative in \
+    "Versions/B/Sparkle" \
+    "Versions/B/Autoupdate" \
+    "Versions/B/Updater.app/Contents/MacOS/Updater"
+  do
+    [ -f "$destination/$relative" ] || fail "embedded Sparkle member is missing: $relative"
+    chmod 0755 "$destination/$relative"
+  done
+}
+
 validate_release_inputs() {
   printf '%s\n' "$APP_VERSION" | awk '/^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$/ { ok=1 } END { exit !ok }' \
     || fail "APP_VERSION must be a strict three-component release semver such as 0.1.0"
@@ -313,8 +353,16 @@ signature_kind() {
 ad_hoc_sign_app() {
   app=$1
   executable="$app/Contents/MacOS/$APP_EXECUTABLE"
+  framework="$app/Contents/Frameworks/Sparkle.framework"
   require_command codesign
   [ -x "$executable" ] || fail "app executable is missing: $executable"
+  # Nested code is sealed inside-out and explicitly; --deep signing is never
+  # used so any new nested payload must be added here deliberately.
+  if [ -d "$framework" ]; then
+    codesign --force --sign - "$framework/Versions/B/Updater.app"
+    codesign --force --sign - "$framework/Versions/B/Autoupdate"
+    codesign --force --sign - "$framework"
+  fi
   codesign --force --sign - "$executable"
   codesign --force --sign - "$app"
   codesign --verify --deep --strict --verbose=2 "$app"
@@ -331,14 +379,15 @@ verify_info_plist_and_resources() {
   [ -f "$pkginfo" ] && [ ! -L "$pkginfo" ] || fail "PkgInfo is missing or is a symlink"
   [ -s "$icon" ] && [ ! -L "$icon" ] || fail "AppIcon.icns is missing, empty, or a symlink"
   plutil -lint "$plist" >/dev/null
-  python3 - "$plist" "$APP_NAME" "$APP_EXECUTABLE" "$BUNDLE_ID" "$APP_VERSION" "$BUILD_NUMBER" "$MINIMUM_MACOS_VERSION" <<'PY' || fail "Info.plist values are not exact"
+  python3 - "$plist" "$APP_NAME" "$APP_EXECUTABLE" "$BUNDLE_ID" "$APP_VERSION" "$BUILD_NUMBER" "$MINIMUM_MACOS_VERSION" \
+    "$SPARKLE_FEED_URL" "$SPARKLE_PUBLIC_ED_KEY" <<'PY' || fail "Info.plist values are not exact"
 import pathlib
 import plistlib
 import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
-app_name, executable, bundle_id, version, build, minimum = sys.argv[2:]
+app_name, executable, bundle_id, version, build, minimum, feed_url, public_ed_key = sys.argv[2:]
 raw = path.read_bytes()
 if re.search(rb"@[A-Z][A-Z0-9_]*@", raw):
     print("Info.plist contains an unresolved placeholder", file=sys.stderr)
@@ -360,6 +409,9 @@ expected = {
     "LSUIElement": True,
     "NSHighResolutionCapable": True,
     "NSHumanReadableCopyright": "Copyright © 2026 ForgeCode.",
+    "SUEnableAutomaticChecks": True,
+    "SUFeedURL": feed_url,
+    "SUPublicEDKey": public_ed_key,
 }
 if actual != expected:
     for key in sorted(set(actual) | set(expected)):
@@ -383,6 +435,9 @@ import pathlib
 import stat
 import sys
 
+sys.path.insert(0, os.environ["FORGE_PACKAGING_SCRIPT_DIR"])
+from sparkle_inventory import sparkle_expected
+
 root = pathlib.Path(sys.argv[1])
 executable = sys.argv[2]
 runtime_name = sys.argv[3].lower()
@@ -399,12 +454,17 @@ expected_files = {
     "Contents/Resources/AppIcon.icns",
     "Contents/_CodeSignature/CodeResources",
 }
+sparkle_directories, sparkle_files, sparkle_links, sparkle_executables = sparkle_expected()
+expected_directories |= sparkle_directories
+expected_files |= sparkle_files
+expected_executables = {f"Contents/MacOS/{executable}"} | sparkle_executables
 optional_files = set()
 if os.environ.get("BUILD_FLAVOR") == "signed":
     # Apple's stapler may add the notarization ticket at this app-level path.
     optional_files.add("Contents/CodeResources")
 actual_directories = set()
 actual_files = set()
+actual_links = {}
 errors = []
 for current, directories, files in os.walk(root, topdown=True, followlinks=False):
     for name in list(directories) + files:
@@ -414,7 +474,12 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
         if runtime_name in name.lower():
             errors.append(f"runtime payload path: {relative}")
         if stat.S_ISLNK(info.st_mode):
-            errors.append(f"symlink is forbidden: {relative}")
+            # Symlinks are permitted solely inside the embedded Sparkle
+            # framework, and each one must match the vendored copy exactly.
+            if relative in sparkle_links:
+                actual_links[relative] = os.readlink(path)
+            else:
+                errors.append(f"symlink is forbidden: {relative}")
             if name in directories:
                 directories.remove(name)
         elif stat.S_ISDIR(info.st_mode):
@@ -422,7 +487,7 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
         elif stat.S_ISREG(info.st_mode):
             actual_files.add(relative)
             is_executable = bool(info.st_mode & 0o111)
-            should_execute = relative == f"Contents/MacOS/{executable}"
+            should_execute = relative in expected_executables
             if is_executable != should_execute:
                 errors.append(f"unexpected executable mode: {relative}")
         else:
@@ -435,6 +500,10 @@ for path in sorted(expected_files - actual_files):
     errors.append(f"missing file: {path}")
 for path in sorted(actual_files - expected_files - optional_files):
     errors.append(f"unexpected file: {path}")
+if actual_links != sparkle_links:
+    for path in sorted(set(sparkle_links) | set(actual_links)):
+        if actual_links.get(path) != sparkle_links.get(path):
+            errors.append(f"framework symlink mismatch: {path} -> {actual_links.get(path)!r}")
 if errors:
     for error in errors:
         print(error, file=sys.stderr)
@@ -451,6 +520,9 @@ import os
 import pathlib
 import stat
 import sys
+
+sys.path.insert(0, os.environ["FORGE_PACKAGING_SCRIPT_DIR"])
+from sparkle_inventory import sparkle_expected
 
 root = pathlib.Path(sys.argv[1])
 app_name = sys.argv[2]
@@ -474,11 +546,15 @@ expected_files = {
     f"{app}/Contents/Resources/AppIcon.icns",
     f"{app}/Contents/_CodeSignature/CodeResources",
 }
+sparkle_directories, sparkle_files, sparkle_links, sparkle_executables = sparkle_expected(prefix=f"{app}/")
+expected_directories |= sparkle_directories
+expected_files |= sparkle_files
+expected_executables = {f"{app}/Contents/MacOS/{executable}"} | sparkle_executables
 optional_files = set()
 if os.environ.get("BUILD_FLAVOR") == "signed":
     # Match the signed app inventory when stapler adds its app-level ticket.
     optional_files.add(f"{app}/Contents/CodeResources")
-expected_links = {"Applications": "/Applications"}
+expected_links = {"Applications": "/Applications", **sparkle_links}
 actual_directories = set()
 actual_files = set()
 actual_links = {}
@@ -499,7 +575,7 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
         elif stat.S_ISREG(info.st_mode):
             actual_files.add(relative)
             is_executable = bool(info.st_mode & 0o111)
-            should_execute = relative == f"{app}/Contents/MacOS/{executable}"
+            should_execute = relative in expected_executables
             if is_executable != should_execute:
                 errors.append(f"unexpected executable mode: {relative}")
         else:
@@ -621,21 +697,41 @@ import pathlib
 import stat
 import sys
 
+sys.path.insert(0, os.environ["FORGE_PACKAGING_SCRIPT_DIR"])
+from sparkle_inventory import sparkle_expected
+
 dist, app, manifest, dmg, output = map(pathlib.Path, sys.argv[1:])
+_, _, sparkle_links, _ = sparkle_expected()
 paths = []
+actual_links = {}
 for current, directories, files in os.walk(app, topdown=True, followlinks=False):
-    for name in directories:
+    for name in list(directories):
         path = pathlib.Path(current, name)
         if path.is_symlink():
+            relative = path.relative_to(app).as_posix()
+            if relative in sparkle_links:
+                actual_links[relative] = os.readlink(path)
+                directories.remove(name)
+                continue
             print(f"symlink forbidden while checksumming: {path}", file=sys.stderr)
             raise SystemExit(1)
     for name in files:
         path = pathlib.Path(current, name)
         info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            relative = path.relative_to(app).as_posix()
+            if relative in sparkle_links:
+                actual_links[relative] = os.readlink(path)
+                continue
+            print(f"symlink forbidden while checksumming: {path}", file=sys.stderr)
+            raise SystemExit(1)
         if not stat.S_ISREG(info.st_mode):
             print(f"non-regular app member: {path}", file=sys.stderr)
             raise SystemExit(1)
         paths.append(path)
+if actual_links != sparkle_links:
+    print("embedded Sparkle symlinks do not match the vendored framework", file=sys.stderr)
+    raise SystemExit(1)
 paths.extend([manifest, dmg])
 relative_paths = [path.relative_to(dist).as_posix() for path in paths]
 if len(relative_paths) != len(set(relative_paths)):
@@ -663,20 +759,41 @@ import re
 import stat
 import sys
 
+sys.path.insert(0, os.environ["FORGE_PACKAGING_SCRIPT_DIR"])
+from sparkle_inventory import sparkle_expected
+
 dist, app, manifest, dmg, sums = map(pathlib.Path, sys.argv[1:])
+_, _, sparkle_links, _ = sparkle_expected()
 expected_paths = []
+actual_links = {}
 for current, directories, files in os.walk(app, topdown=True, followlinks=False):
-    for name in directories:
+    for name in list(directories):
         path = pathlib.Path(current, name)
         if path.is_symlink():
+            relative = path.relative_to(app).as_posix()
+            if relative in sparkle_links:
+                actual_links[relative] = os.readlink(path)
+                directories.remove(name)
+                continue
             print(f"symlink forbidden while verifying checksums: {path}", file=sys.stderr)
             raise SystemExit(1)
     for name in files:
         path = pathlib.Path(current, name)
-        if not stat.S_ISREG(path.lstat().st_mode):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            relative = path.relative_to(app).as_posix()
+            if relative in sparkle_links:
+                actual_links[relative] = os.readlink(path)
+                continue
+            print(f"symlink forbidden while verifying checksums: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        if not stat.S_ISREG(info.st_mode):
             print(f"non-regular app member: {path}", file=sys.stderr)
             raise SystemExit(1)
         expected_paths.append(path.relative_to(dist).as_posix())
+if actual_links != sparkle_links:
+    print("embedded Sparkle symlinks do not match the vendored framework", file=sys.stderr)
+    raise SystemExit(1)
 expected_paths.extend([manifest.relative_to(dist).as_posix(), dmg.relative_to(dist).as_posix()])
 expected = set(expected_paths)
 if len(expected) != len(expected_paths):

@@ -47,6 +47,7 @@ make_fixture_app() {
 PLIST
   printf 'icon' > "$app/Contents/Resources/AppIcon.icns"
   printf 'APPL????' > "$app/Contents/PkgInfo"
+  embed_sparkle_framework "$app"
   ad_hoc_sign_app "$app"
 }
 
@@ -59,7 +60,7 @@ make_fixture_dmg_mount() {
   ln -s /Applications "$mount_root/Applications"
 }
 
-printf '1..17\n'
+printf '1..20\n'
 
 [ -z "${FORGE_LIVE_RUNTIME_SMOKE+x}" ] || fail "packaging did not unset FORGE_LIVE_RUNTIME_SMOKE"
 pass "live runtime smoke is unset"
@@ -91,6 +92,25 @@ symlink_app="$fixtures/Symlink.app"
 make_fixture_app "$symlink_app"
 ln -s AppIcon.icns "$symlink_app/Contents/Resources/link.icns"
 expect_failure "app inventory rejects symlinks" verify_app_inventory "$symlink_app"
+
+sparkle_missing_app="$fixtures/SparkleMissing.app"
+make_fixture_app "$sparkle_missing_app"
+safe_remove "$sparkle_missing_app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+expect_failure "app inventory rejects an incomplete Sparkle framework" \
+  verify_app_inventory "$sparkle_missing_app"
+
+sparkle_link_app="$fixtures/SparkleLink.app"
+make_fixture_app "$sparkle_link_app"
+rm "$sparkle_link_app/Contents/Frameworks/Sparkle.framework/Sparkle"
+ln -s Versions/B/Autoupdate "$sparkle_link_app/Contents/Frameworks/Sparkle.framework/Sparkle"
+expect_failure "app inventory rejects a retargeted Sparkle symlink" \
+  verify_app_inventory "$sparkle_link_app"
+
+sparkle_extra_app="$fixtures/SparkleExtra.app"
+make_fixture_app "$sparkle_extra_app"
+printf 'payload' > "$sparkle_extra_app/Contents/Frameworks/Sparkle.framework/Versions/B/extra"
+expect_failure "app inventory rejects extra files inside the Sparkle framework" \
+  verify_app_inventory "$sparkle_extra_app"
 
 runtime_app="$fixtures/Runtime.app"
 make_fixture_app "$runtime_app"
