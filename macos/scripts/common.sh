@@ -526,7 +526,6 @@ runtime_name = sys.argv[4].lower()
 app = f"{app_name}.app"
 framework = f"{app}/Contents/Frameworks/Sparkle.framework"
 expected_directories = {
-    ".background",
     app,
     f"{app}/Contents",
     f"{app}/Contents/Frameworks",
@@ -537,7 +536,8 @@ expected_directories = {
 }
 expected_files = {
     ".DS_Store",
-    ".background/background.png",
+    ".VolumeIcon.icns",
+    "background.png",
     f"{app}/Contents/Info.plist",
     f"{app}/Contents/PkgInfo",
     f"{app}/Contents/MacOS/{executable}",
