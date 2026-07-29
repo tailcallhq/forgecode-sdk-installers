@@ -232,147 +232,6 @@ final class RuntimeInstallerTests: XCTestCase {
         XCTAssertEqual(calls.first?.terminationGracePeriod, 0.2)
     }
 
-    func testProductionVersionIdentityInspectorRequiresExactUnambiguousMatchingCompiledRecords() throws {
-        let directory = try TemporaryDirectory()
-        defer { directory.remove() }
-        let inspector = Forge3MachOVersionIdentityInspector()
-        let expected = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-
-        func writeFixture(commandVersion: String, updateVersion: String, duplicateCommand: Bool = false) throws -> URL {
-            let executable = directory.url.appendingPathComponent(UUID().uuidString)
-            var bytes = Data("prefix".utf8)
-            let commandRecord = Forge3MachOVersionIdentityInspector.metadataPrefix
-                + Data(commandVersion.utf8)
-                + Forge3MachOVersionIdentityInspector.metadataSuffix
-            bytes.append(commandRecord)
-            if duplicateCommand { bytes.append(commandRecord) }
-            bytes.append(Data("middle".utf8))
-            bytes.append(Data(updateVersion.utf8))
-            bytes.append(Forge3MachOVersionIdentityInspector.updateMetadataSuffix)
-            bytes.append(Data("suffix".utf8))
-            try bytes.write(to: executable)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-            return executable
-        }
-
-        let valid = try writeFixture(commandVersion: "1.2.3", updateVersion: "1.2.3")
-        let validIdentity = try RuntimeExecutableIdentityValidator.capture(valid)
-        XCTAssertEqual(
-            try inspector.inspectVersionIdentity(
-                of: valid,
-                expectedVersion: expected,
-                expectedIdentity: validIdentity
-            ),
-            RuntimeExecutableVersionIdentity(version: expected)
-        )
-
-        let wrongExpected = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.4"))
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: valid,
-                expectedVersion: wrongExpected,
-                expectedIdentity: validIdentity
-            )
-        ) {
-            XCTAssertEqual(
-                $0 as? RuntimeInstallerError,
-                .executableVersionIdentityMismatch(expected: wrongExpected, actual: expected)
-            )
-        }
-
-        let conflicting = try writeFixture(commandVersion: "1.2.3", updateVersion: "1.2.4")
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: conflicting,
-                expectedVersion: expected,
-                expectedIdentity: try RuntimeExecutableIdentityValidator.capture(conflicting)
-            )
-        ) {
-            XCTAssertEqual(
-                $0 as? RuntimeInstallerError,
-                .invalidExecutableVersionIdentity("compiled forge3 command and update identities disagree")
-            )
-        }
-
-        let ambiguous = try writeFixture(commandVersion: "1.2.3", updateVersion: "1.2.3", duplicateCommand: true)
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: ambiguous,
-                expectedVersion: expected,
-                expectedIdentity: try RuntimeExecutableIdentityValidator.capture(ambiguous)
-            )
-        ) {
-            XCTAssertEqual(
-                $0 as? RuntimeInstallerError,
-                .invalidExecutableVersionIdentity("forge3 command version metadata is ambiguous")
-            )
-        }
-
-        let malformed = try writeFixture(commandVersion: "01.2.3", updateVersion: "01.2.3")
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: malformed,
-                expectedVersion: expected,
-                expectedIdentity: try RuntimeExecutableIdentityValidator.capture(malformed)
-            )
-        ) {
-            XCTAssertEqual(
-                $0 as? RuntimeInstallerError,
-                .invalidExecutableVersionIdentity(
-                    "embedded forge3 command version is not an exact three-component version"
-                )
-            )
-        }
-    }
-
-    func testProductionVersionIdentityInspectorRejectsChangedSymlinkedAndHardLinkedIdentity() throws {
-        let directory = try TemporaryDirectory()
-        defer { directory.remove() }
-        let expected = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-        let executable = directory.url.appendingPathComponent("forge3")
-        var bytes = Forge3MachOVersionIdentityInspector.metadataPrefix
-        bytes.append(Data(expected.rawValue.utf8))
-        bytes.append(Forge3MachOVersionIdentityInspector.metadataSuffix)
-        bytes.append(Data(expected.rawValue.utf8))
-        bytes.append(Forge3MachOVersionIdentityInspector.updateMetadataSuffix)
-        try bytes.write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        let identity = try RuntimeExecutableIdentityValidator.capture(executable)
-        let inspector = Forge3MachOVersionIdentityInspector()
-
-        let symlink = directory.url.appendingPathComponent("forge3-link")
-        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: executable)
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: symlink,
-                expectedVersion: expected,
-                expectedIdentity: identity
-            )
-        )
-
-        let hardLink = directory.url.appendingPathComponent("forge3-hardlink")
-        try FileManager.default.linkItem(at: executable, to: hardLink)
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: executable,
-                expectedVersion: expected,
-                expectedIdentity: identity
-            )
-        )
-        try FileManager.default.removeItem(at: hardLink)
-
-        try FileManager.default.removeItem(at: executable)
-        try bytes.write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        XCTAssertThrowsError(
-            try inspector.inspectVersionIdentity(
-                of: executable,
-                expectedVersion: expected,
-                expectedIdentity: identity
-            )
-        )
-    }
-
     func testMachOValidatorAcceptsAdHocSignedBinaryAndRejectsCorruptPresentSignature() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -701,11 +560,7 @@ final class RuntimeInstallerTests: XCTestCase {
                 network: network,
                 store: MockStore(),
                 archive: MockArchive(executable: macho(architecture: .arm64)),
-                validator: MachORuntimeValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                executionProbe: ScriptedExecutionProbe([.succeeded])
+                validator: MachORuntimeValidator()
             )
         )
         let phases = LockedValues<RuntimeInstallationPhase>()
@@ -733,11 +588,7 @@ final class RuntimeInstallerTests: XCTestCase {
                 network: network,
                 store: store,
                 archive: archive,
-                validator: MachORuntimeValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                executionProbe: ScriptedExecutionProbe([.succeeded])
+                validator: MachORuntimeValidator()
             )
         )
         let installed = try await installer.install(version: version)
@@ -745,6 +596,89 @@ final class RuntimeInstallerTests: XCTestCase {
         let requestedURLs = await network.requestedURLs
         XCTAssertEqual(Set(requestedURLs), Set([archiveURL, checksumURL]))
         XCTAssertEqual(store.installCount, 1)
+    }
+
+    func testInstallerAcceptsAdHocMachOWithoutVersionMarkersOrRunnableVersionCommandAndRejectsValidationFailures() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let source = directory.url.appendingPathComponent("main.c")
+        let binary = directory.url.appendingPathComponent("forge3")
+        try """
+        #include <string.h>
+        int main(int argc, char **argv) {
+            return argc > 1 && strcmp(argv[1], "--version") == 0 ? 73 : 0;
+        }
+        """.write(to: source, atomically: true, encoding: .utf8)
+        try runTool("/usr/bin/clang", [source.path, "-o", binary.path])
+        try runTool("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
+        let executable = try Data(contentsOf: binary)
+        XCTAssertNil(executable.range(of: Data("forge3 1.2.3".utf8)))
+
+        func makeInstaller(
+            archiveData: Data = Data("archive-fixture".utf8),
+            sidecarChecksum: String? = nil,
+            executableData: Data = executable
+        ) throws -> (RuntimeInstaller, MockStore) {
+            let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
+            let archiveURL = RuntimeReleaseURLs.archive(version: version, architecture: .native)
+            let checksumURL = RuntimeReleaseURLs.checksum(version: version, architecture: .native)
+            let checksum = sidecarChecksum ?? RuntimeSHA256.hexDigest(of: archiveData)
+            let store = MockStore()
+            return (
+                RuntimeInstaller(
+                    architecture: .native,
+                    dependencies: .init(
+                        network: MockNetwork(responses: [
+                            archiveURL: archiveData,
+                            checksumURL: Data("\(checksum) *\(RuntimeArchitecture.native.archiveName)\n".utf8)
+                        ]),
+                        store: store,
+                        archive: MockArchive(executable: executableData),
+                        validator: MachORuntimeValidator(),
+                        signatureInspector: MachORuntimeValidator(),
+                        quarantineManager: RecordingQuarantineManager(quarantined: false)
+                    )
+                ),
+                store
+            )
+        }
+
+        let (installer, store) = try makeInstaller()
+        let installed = try await installer.install(version: RuntimeReleaseVersion(rawValue: "1.2.3")!)
+        XCTAssertEqual(installed.version.rawValue, "1.2.3")
+        XCTAssertEqual(store.installCount, 1)
+
+        let (checksumInstaller, checksumStore) = try makeInstaller(
+            sidecarChecksum: String(repeating: "0", count: 64)
+        )
+        do {
+            _ = try await checksumInstaller.install(version: RuntimeReleaseVersion(rawValue: "1.2.3")!)
+            XCTFail("expected checksum failure")
+        } catch let error as RuntimeInstallerError {
+            guard case .checksumMismatch = error else { return XCTFail("unexpected \(error)") }
+        }
+        XCTAssertEqual(checksumStore.installCount, 0)
+
+        let (machOInstaller, machOStore) = try makeInstaller(executableData: Data("not-mach-o".utf8))
+        do {
+            _ = try await machOInstaller.install(version: RuntimeReleaseVersion(rawValue: "1.2.3")!)
+            XCTFail("expected Mach-O failure")
+        } catch let error as RuntimeInstallerError {
+            guard case .invalidMachO = error else { return XCTFail("unexpected \(error)") }
+        }
+        XCTAssertEqual(machOStore.installCount, 0)
+
+        var corruptSignature = executable
+        let signatureRange = try XCTUnwrap(machOCodeSignatureRange(corruptSignature))
+        corruptSignature[signatureRange.lowerBound + 16] ^= 0xff
+        let (signatureInstaller, signatureStore) = try makeInstaller(executableData: corruptSignature)
+        do {
+            _ = try await signatureInstaller.install(version: RuntimeReleaseVersion(rawValue: "1.2.3")!)
+            XCTFail("expected signature failure")
+        } catch let error as RuntimeInstallerError {
+            guard case .invalidMachO = error else { return XCTFail("unexpected \(error)") }
+        }
+        XCTAssertEqual(signatureStore.installCount, 0)
     }
 
     func testInstallerRejectsMalformedManifestAndChecksumEndToEnd() async throws {
@@ -823,12 +757,7 @@ final class RuntimeInstallerTests: XCTestCase {
                 network: network,
                 store: MockStore(),
                 archive: MockArchive(executable: macho(architecture: .arm64)),
-                validator: MachORuntimeValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: firstVersion)),
-                    .success(RuntimeExecutableVersionIdentity(version: secondVersion))
-                ]),
-                executionProbe: ScriptedExecutionProbe([.succeeded, .succeeded])
+                validator: MachORuntimeValidator()
             )
         )
 
@@ -861,11 +790,7 @@ final class RuntimeInstallerTests: XCTestCase {
                 network: network,
                 store: store,
                 archive: MockArchive(executable: macho(architecture: .arm64)),
-                validator: MachORuntimeValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                executionProbe: ScriptedExecutionProbe([.succeeded])
+                validator: MachORuntimeValidator()
             )
         )
         async let firstOperation = installer.install(version: version)
@@ -890,8 +815,6 @@ final class RuntimeInstallerTests: XCTestCase {
                 store: MockStore(),
                 archive: MockArchive(executable: macho(architecture: .arm64)),
                 validator: MachORuntimeValidator(),
-                versionInspector: ExpectedVersionIdentityInspector(),
-                executionProbe: ScriptedExecutionProbe([.succeeded]),
                 progressDeliveryHook: hook
             )
         )
@@ -941,11 +864,7 @@ final class RuntimeInstallerTests: XCTestCase {
                 network: network,
                 store: store,
                 archive: MockArchive(executable: macho(architecture: .arm64)),
-                validator: MachORuntimeValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                executionProbe: ScriptedExecutionProbe([.succeeded])
+                validator: MachORuntimeValidator()
             )
         )
         let cancelled = Task { try await installer.install(version: version) }
@@ -1010,7 +929,6 @@ final class RuntimeInstallerTests: XCTestCase {
     }
 
     func testProductionTemporaryTrustPolicyPredicateIsExactlyAdHocPlusQuarantine() throws {
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
         let identity = RuntimeExecutableIdentity(
             device: 1,
             inode: 2,
@@ -1029,7 +947,6 @@ final class RuntimeInstallerTests: XCTestCase {
                     for: RuntimePreExecutionTrustContext(
                         signatureClass: signatureClass,
                         hasQuarantine: hasQuarantine,
-                        versionIdentity: RuntimeExecutableVersionIdentity(version: version),
                         architecture: .arm64,
                         executableIdentity: identity
                     )
@@ -1187,16 +1104,14 @@ final class RuntimeInstallerTests: XCTestCase {
         }
     }
 
-    func testDeveloperIDAuthenticationRequirementFailureIsABarrierBeforeTrustPolicyOrProbe() async throws {
+    func testDeveloperIDAuthenticationRequirementFailureIsABarrierBeforeTrustPolicy() async throws {
         let expected = RuntimeInstallerError.developerIDAuthenticationFailed(
             "injected Apple-anchor evaluation failure"
         )
         let trustPolicy = RecordingTrustPolicy(decision: .preserve)
         let quarantine = RecordingQuarantineManager()
-        let probe = ScriptedExecutionProbe([.succeeded])
         let evaluator = RecordingDeveloperIDRequirementEvaluator(results: [.failure(expected)])
         let fixture = try installerFixture(
-            probe: probe,
             quarantineManager: quarantine,
             securityLogger: RecordingSecurityLogger(),
             signatureInspector: matchingDeveloperIDSignatureInspector(),
@@ -1214,11 +1129,10 @@ final class RuntimeInstallerTests: XCTestCase {
         XCTAssertEqual(evaluator.calls.map(\.expectedTeamIdentifier), ["TEAM123456"])
         XCTAssertEqual(trustPolicy.contexts, [])
         XCTAssertEqual(quarantine.inspectedURLs, [])
-        XCTAssertEqual(probe.callCount, 0)
         XCTAssertEqual(fixture.store.installCount, 0)
     }
 
-    func testDeveloperIDTeamAuthenticationIsABarrierBeforeTrustPolicyOrProbe() async throws {
+    func testDeveloperIDTeamAuthenticationIsABarrierBeforeTrustPolicy() async throws {
         let cases: [(String?, String?, RuntimeInstallerError?)] = [
             ("TEAM123456", "TEAM123456", nil),
             (nil, "TEAM123456", .developerIDAuthenticationFailed(
@@ -1235,10 +1149,8 @@ final class RuntimeInstallerTests: XCTestCase {
         for (expectedTeam, actualTeam, expectedError) in cases {
             let trustPolicy = RecordingTrustPolicy(decision: .preserve)
             let quarantine = RecordingQuarantineManager()
-            let probe = ScriptedExecutionProbe([.succeeded])
             let signingIdentity = "Developer ID Application: Forge Example"
             let fixture = try installerFixture(
-                probe: probe,
                 quarantineManager: quarantine,
                 securityLogger: RecordingSecurityLogger(),
                 signatureInspector: RecordingSignatureInspector(inspections: [
@@ -1263,7 +1175,6 @@ final class RuntimeInstallerTests: XCTestCase {
                 }
                 XCTAssertEqual(trustPolicy.contexts, [])
                 XCTAssertEqual(quarantine.inspectedURLs, [])
-                XCTAssertEqual(probe.callCount, 0)
                 XCTAssertEqual(fixture.store.installCount, 0)
             } else {
                 _ = try await fixture.installer.install(version: fixture.version)
@@ -1271,7 +1182,6 @@ final class RuntimeInstallerTests: XCTestCase {
                 XCTAssertEqual(trustPolicy.contexts.first?.signature.teamIdentifier, expectedTeam)
                 XCTAssertEqual(trustPolicy.contexts.first?.signature.signingIdentity, signingIdentity)
                 XCTAssertEqual(quarantine.refreshedURLs, [])
-                XCTAssertEqual(probe.callCount, 1)
                 XCTAssertEqual(fixture.store.installCount, 1)
             }
         }
@@ -1282,9 +1192,7 @@ final class RuntimeInstallerTests: XCTestCase {
         let signatureInspector = RecordingSignatureInspector([.adHoc])
         let trustPolicy = RecordingTrustPolicy(decision: .refreshRemovingQuarantine)
         let quarantine = RecordingQuarantineManager()
-        let probe = ScriptedExecutionProbe([.succeeded])
         let fixture = try installerFixture(
-            probe: probe,
             quarantineManager: quarantine,
             securityLogger: RecordingSecurityLogger(),
             validator: validator,
@@ -1303,19 +1211,16 @@ final class RuntimeInstallerTests: XCTestCase {
         XCTAssertEqual(trustPolicy.contexts, [])
         XCTAssertEqual(quarantine.inspectedURLs, [])
         XCTAssertEqual(quarantine.refreshedURLs, [])
-        XCTAssertEqual(probe.callCount, 0)
         XCTAssertEqual(fixture.store.installCount, 0)
     }
 
-    func testTemporaryTrustPolicyRefreshesOnlyAdHocQuarantinedArtifactBeforeFirstProbe() async throws {
+    func testTemporaryTrustPolicyRefreshesOnlyAdHocQuarantinedArtifactBeforeInstall() async throws {
         let validator = RecordingValidator()
         let signatureInspector = RecordingSignatureInspector([.adHoc, .adHoc])
         let trustPolicy = RecordingTrustPolicy(decision: .refreshRemovingQuarantine)
         let quarantine = RecordingQuarantineManager()
         let securityLogger = RecordingSecurityLogger()
-        let probe = ScriptedExecutionProbe([.succeeded])
         let fixture = try installerFixture(
-            probe: probe,
             quarantineManager: quarantine,
             securityLogger: securityLogger,
             validator: validator,
@@ -1338,275 +1243,8 @@ final class RuntimeInstallerTests: XCTestCase {
             quarantine.refreshIdentities.first?.inode,
             try inode(quarantine.refreshedURLs[0])
         )
-        XCTAssertEqual(probe.callCount, 1)
         XCTAssertEqual(securityLogger.events, [.refreshedAdHocQuarantinedStagedExecutable])
         XCTAssertEqual(fixture.store.installCount, 1)
-    }
-
-    func testOrderedValidationTracePlacesVersionBeforePolicyAndAllRefreshChecksBeforeProbe() async throws {
-        let tracer = RecordingValidationTracer()
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-        let fixture = try installerFixture(
-            probe: ScriptedExecutionProbe([.succeeded]),
-            quarantineManager: RecordingQuarantineManager(),
-            securityLogger: RecordingSecurityLogger(),
-            validator: RecordingValidator(),
-            versionInspector: RecordingVersionIdentityInspector([
-                .success(RuntimeExecutableVersionIdentity(version: version)),
-                .success(RuntimeExecutableVersionIdentity(version: version))
-            ]),
-            signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-            trustPolicy: TemporaryAdHocRuntimeTrustPolicy(),
-            validationTracer: tracer
-        )
-
-        _ = try await fixture.installer.install(version: fixture.version)
-
-        XCTAssertEqual(
-            tracer.events,
-            [
-                .initialMachOValidated,
-                .initialIdentityAndHashValidated,
-                .initialVersionIdentityValidated,
-                .initialSignatureClassInspected,
-                .initialQuarantineInspected,
-                .trustPolicyEvaluated,
-                .stagedVnodeRefreshed,
-                .postRefreshIdentityAndHashValidated,
-                .postRefreshMachOValidated,
-                .postRefreshVersionIdentityValidated,
-                .postRefreshSignatureClassInspected,
-                .postRefreshQuarantineValidated,
-                .executionProbeStarted
-            ]
-        )
-    }
-
-    func testInitialAndPostRefreshVersionFailuresAreBarriersThatPreventPolicyOrProbe() async throws {
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-
-        do {
-            let tracer = RecordingValidationTracer()
-            let trustPolicy = RecordingTrustPolicy(decision: .refreshRemovingQuarantine)
-            let probe = ScriptedExecutionProbe([.succeeded])
-            let fixture = try installerFixture(
-                probe: probe,
-                quarantineManager: RecordingQuarantineManager(),
-                securityLogger: RecordingSecurityLogger(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .failure(.invalidExecutableVersionIdentity("ambiguous"))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc]),
-                trustPolicy: trustPolicy,
-                validationTracer: tracer
-            )
-
-            do {
-                _ = try await fixture.installer.install(version: fixture.version)
-                XCTFail("expected initial version identity failure")
-            } catch let error as RuntimeInstallerError {
-                XCTAssertEqual(error, .invalidExecutableVersionIdentity("ambiguous"))
-            }
-            XCTAssertEqual(
-                tracer.events,
-                [.initialMachOValidated, .initialIdentityAndHashValidated]
-            )
-            XCTAssertEqual(trustPolicy.contexts, [])
-            XCTAssertEqual(probe.callCount, 0)
-        }
-
-        do {
-            let tracer = RecordingValidationTracer()
-            let probe = ScriptedExecutionProbe([.succeeded])
-            let fixture = try installerFixture(
-                probe: probe,
-                quarantineManager: RecordingQuarantineManager(),
-                securityLogger: RecordingSecurityLogger(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .failure(.invalidExecutableVersionIdentity("post-refresh malformed"))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-                trustPolicy: TemporaryAdHocRuntimeTrustPolicy(),
-                validationTracer: tracer
-            )
-
-            do {
-                _ = try await fixture.installer.install(version: fixture.version)
-                XCTFail("expected post-refresh version identity failure")
-            } catch let error as RuntimeInstallerError {
-                XCTAssertEqual(error, .invalidExecutableVersionIdentity("post-refresh malformed"))
-            }
-            XCTAssertEqual(
-                tracer.events,
-                [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed,
-                    .postRefreshIdentityAndHashValidated,
-                    .postRefreshMachOValidated
-                ]
-            )
-            XCTAssertEqual(probe.callCount, 0)
-        }
-    }
-
-    func testEveryPostRefreshValidationFailurePreventsExecutionProbe() async throws {
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-
-        struct Case {
-            let name: String
-            let validator: RecordingValidator
-            let versionInspector: RecordingVersionIdentityInspector
-            let signatureInspector: RecordingSignatureInspector
-            let quarantineManager: RecordingQuarantineManager
-            let expectedEvents: [RuntimeInstallerValidationEvent]
-        }
-
-        let cases = [
-            Case(
-                name: "identity/hash",
-                validator: RecordingValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-                quarantineManager: RecordingQuarantineManager(
-                    corruptReturnedHashAfterRefresh: true
-                ),
-                expectedEvents: [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed
-                ]
-            ),
-            Case(
-                name: "Mach-O",
-                validator: RecordingValidator(results: [
-                    .success(()),
-                    .failure(.invalidMachO("post-refresh rejected"))
-                ]),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-                quarantineManager: RecordingQuarantineManager(),
-                expectedEvents: [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed,
-                    .postRefreshIdentityAndHashValidated
-                ]
-            ),
-            Case(
-                name: "version identity",
-                validator: RecordingValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .failure(.invalidExecutableVersionIdentity("post-refresh malformed"))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-                quarantineManager: RecordingQuarantineManager(),
-                expectedEvents: [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed,
-                    .postRefreshIdentityAndHashValidated,
-                    .postRefreshMachOValidated
-                ]
-            ),
-            Case(
-                name: "signature class",
-                validator: RecordingValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .developerID]),
-                quarantineManager: RecordingQuarantineManager(),
-                expectedEvents: [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed,
-                    .postRefreshIdentityAndHashValidated,
-                    .postRefreshMachOValidated,
-                    .postRefreshVersionIdentityValidated
-                ]
-            ),
-            Case(
-                name: "quarantine removal",
-                validator: RecordingValidator(),
-                versionInspector: RecordingVersionIdentityInspector([
-                    .success(RuntimeExecutableVersionIdentity(version: version)),
-                    .success(RuntimeExecutableVersionIdentity(version: version))
-                ]),
-                signatureInspector: RecordingSignatureInspector([.adHoc, .adHoc]),
-                quarantineManager: RecordingQuarantineManager(
-                    forceQuarantinedAfterRefresh: true
-                ),
-                expectedEvents: [
-                    .initialMachOValidated,
-                    .initialIdentityAndHashValidated,
-                    .initialVersionIdentityValidated,
-                    .initialSignatureClassInspected,
-                    .initialQuarantineInspected,
-                    .trustPolicyEvaluated,
-                    .stagedVnodeRefreshed,
-                    .postRefreshIdentityAndHashValidated,
-                    .postRefreshMachOValidated,
-                    .postRefreshVersionIdentityValidated,
-                    .postRefreshSignatureClassInspected
-                ]
-            )
-        ]
-
-        for testCase in cases {
-            let tracer = RecordingValidationTracer()
-            let probe = ScriptedExecutionProbe([.succeeded])
-            let fixture = try installerFixture(
-                probe: probe,
-                quarantineManager: testCase.quarantineManager,
-                securityLogger: RecordingSecurityLogger(),
-                validator: testCase.validator,
-                versionInspector: testCase.versionInspector,
-                signatureInspector: testCase.signatureInspector,
-                trustPolicy: TemporaryAdHocRuntimeTrustPolicy(),
-                validationTracer: tracer
-            )
-
-            do {
-                _ = try await fixture.installer.install(version: fixture.version)
-                XCTFail("expected post-refresh \(testCase.name) failure")
-            } catch {
-                // Each injected failure is expected; the barrier assertions below are the security property.
-            }
-            XCTAssertEqual(tracer.events, testCase.expectedEvents, testCase.name)
-            XCTAssertFalse(tracer.events.contains(.executionProbeStarted), testCase.name)
-            XCTAssertEqual(probe.callCount, 0, testCase.name)
-            XCTAssertEqual(fixture.store.installCount, 0, testCase.name)
-        }
     }
 
     func testTemporaryTrustPolicyPreservesUnquarantinedAndDeveloperIDArtifacts() async throws {
@@ -1623,7 +1261,6 @@ final class RuntimeInstallerTests: XCTestCase {
                 ? matchingDeveloperIDAuthenticationPolicy()
                 : RuntimeDeveloperIDAuthenticationPolicy()
             let fixture = try installerFixture(
-                probe: ScriptedExecutionProbe([.succeeded]),
                 quarantineManager: quarantine,
                 securityLogger: RecordingSecurityLogger(),
                 signatureInspector: signatureInspector,
@@ -1653,7 +1290,6 @@ final class RuntimeInstallerTests: XCTestCase {
                 ? matchingDeveloperIDAuthenticationPolicy()
                 : RuntimeDeveloperIDAuthenticationPolicy()
             let fixture = try installerFixture(
-                probe: ScriptedExecutionProbe([.succeeded]),
                 quarantineManager: quarantine,
                 securityLogger: RecordingSecurityLogger(),
                 signatureInspector: signatureInspector,
@@ -1677,12 +1313,10 @@ final class RuntimeInstallerTests: XCTestCase {
         }
     }
 
-    func testPostRefreshIdentityAndMachOAreRevalidatedBeforeProbe() async throws {
+    func testPostRefreshIdentityAndMachOAreRevalidatedBeforeInstall() async throws {
         let validator = RecordingValidator()
         let quarantine = RecordingQuarantineManager()
-        let probe = ScriptedExecutionProbe([.succeeded])
         let fixture = try installerFixture(
-            probe: probe,
             quarantineManager: quarantine,
             securityLogger: RecordingSecurityLogger(),
             validator: validator,
@@ -1694,168 +1328,7 @@ final class RuntimeInstallerTests: XCTestCase {
 
         XCTAssertEqual(validator.calls.count, 2)
         XCTAssertEqual(quarantine.refreshedURLs.count, 1)
-        XCTAssertEqual(probe.callCount, 1)
-    }
-
-    func testTimeoutAndLaunchFailureNeverTriggerQuarantineMutation() async throws {
-        for (probeResult, expectedError) in [
-            (
-                RuntimeExecutionProbeResult.timedOut,
-                RuntimeInstallerError.runtimeProbeFailed("forge3 --version timed out")
-            ),
-            (
-                .executionUnavailable("operation not permitted"),
-                .runtimeProbeFailed("forge3 --version could not launch: operation not permitted")
-            )
-        ] {
-            let quarantine = RecordingQuarantineManager()
-            let fixture = try installerFixture(
-                probe: ScriptedExecutionProbe([probeResult]),
-                quarantineManager: quarantine,
-                securityLogger: RecordingSecurityLogger(),
-                signatureInspector: RecordingSignatureInspector(inspections: [
-                    RuntimeCodeSignatureInspection(
-                        signatureClass: .developerID,
-                        teamIdentifier: "TEAM123456",
-                        signingIdentity: "Developer ID Application: Forge Example (TEAM123456)"
-                    )
-                ]),
-                trustPolicy: RecordingTrustPolicy(decision: .preserve),
-                developerIDAuthenticationPolicy: RuntimeDeveloperIDAuthenticationPolicy(
-                    expectedTeamIdentifier: "TEAM123456"
-                )
-            )
-
-            do {
-                _ = try await fixture.installer.install(version: fixture.version)
-                XCTFail("expected execution probe failure")
-            } catch let error as RuntimeInstallerError {
-                XCTAssertEqual(error, expectedError)
-            }
-            XCTAssertEqual(quarantine.refreshedURLs, [])
-            XCTAssertEqual(fixture.store.installCount, 0)
-        }
-    }
-
-    func testStagedExecutionProbeRejectsVersionMismatchWithoutQuarantineMutation() async throws {
-        let expected = "forge3 1.2.3"
-        let actual = "forge3 1.2.4"
-        let quarantine = RecordingQuarantineManager()
-        let fixture = try installerFixture(
-            probe: ScriptedExecutionProbe([.versionMismatch(expected: expected, actual: actual)]),
-            quarantineManager: quarantine,
-            securityLogger: RecordingSecurityLogger(),
-            signatureInspector: matchingDeveloperIDSignatureInspector(),
-            trustPolicy: RecordingTrustPolicy(decision: .preserve),
-            developerIDAuthenticationPolicy: matchingDeveloperIDAuthenticationPolicy()
-        )
-
-        do {
-            _ = try await fixture.installer.install(version: fixture.version)
-            XCTFail("expected version mismatch")
-        } catch let error as RuntimeInstallerError {
-            XCTAssertEqual(error, .runtimeProbeVersionMismatch(expected: expected, actual: actual))
-        }
-        XCTAssertEqual(quarantine.refreshedURLs, [])
-        XCTAssertEqual(fixture.store.installCount, 0)
-    }
-
-    func testStagedExecutionProbeCancellationAfterPolicyDoesNotMutateAgainOrActivate() async throws {
-        let probe = HoldingExecutionProbe()
-        let quarantine = RecordingQuarantineManager(quarantined: false)
-        let fixture = try installerFixture(
-            probe: probe,
-            quarantineManager: quarantine,
-            securityLogger: RecordingSecurityLogger(),
-            signatureInspector: matchingDeveloperIDSignatureInspector(),
-            trustPolicy: RecordingTrustPolicy(decision: .preserve),
-            developerIDAuthenticationPolicy: matchingDeveloperIDAuthenticationPolicy()
-        )
-        let task = Task { try await fixture.installer.install(version: fixture.version) }
-        await probe.waitUntilStarted()
-
-        task.cancel()
-        do {
-            _ = try await task.value
-            XCTFail("expected cancellation")
-        } catch let error as RuntimeInstallerError {
-            XCTAssertEqual(error, .cancelled)
-        }
-        for _ in 0..<100 where !(await probe.wasCancelled()) {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
-        let probeWasCancelled = await probe.wasCancelled()
-        XCTAssertTrue(probeWasCancelled)
-        XCTAssertEqual(quarantine.refreshedURLs, [])
-        XCTAssertEqual(fixture.store.installCount, 0)
-    }
-
-    func testStagedProbeRejectsReplacementAtAdjacentLaunchValidation() async throws {
-        let directory = try TemporaryDirectory()
-        defer { directory.remove() }
-        let executable = directory.url.appendingPathComponent("forge3")
-        let replacement = directory.url.appendingPathComponent("replacement")
-        try Data("#!/bin/sh\nprintf 'forge3 1.2.3\\n'\n".utf8).write(to: executable)
-        try Data("#!/bin/sh\nprintf 'forge3 1.2.3\\n'\n".utf8).write(to: replacement)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
-        let identity = try RuntimeExecutableIdentityValidator.capture(executable)
-        let probe = BoundedRuntimeExecutionProbe(
-            processRunner: POSIXRuntimeProcessRunner(
-                launchHooks: RuntimePinnedLaunchHooks(beforeFinalIdentityValidation: {
-                    try FileManager.default.removeItem(at: executable)
-                    try FileManager.default.moveItem(at: replacement, to: executable)
-                })
-            ),
-            timeout: 1,
-            terminationGracePeriod: 0.1,
-            maximumOutputBytes: 128
-        )
-
-        do {
-            _ = try await probe.probe(
-                executableURL: executable,
-                expectedVersion: RuntimeReleaseVersion(rawValue: "1.2.3")!,
-                expectedIdentity: identity
-            )
-            XCTFail("staged executable replacement must be rejected before spawn")
-        } catch {
-            XCTAssertEqual(
-                error as? RuntimeInstallerError,
-                .untrustedStoreItem("runtime executable identity changed at the launch boundary")
-            )
-        }
-    }
-
-    func testBoundedExecutionProbeUsesExactVersionCommandAndOutput() async throws {
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-        let runner = RecordingProcessRunner(results: [
-            .success(RuntimeProcessResult(status: 0, stdout: Data("forge3 1.2.3\n".utf8))),
-            .success(RuntimeProcessResult(status: 0, stdout: Data("forge3 1.2.3 \n".utf8)))
-        ])
-        let probe = BoundedRuntimeExecutionProbe(
-            processRunner: runner,
-            timeout: 0.25,
-            terminationGracePeriod: 0.05,
-            maximumOutputBytes: 128
-        )
-        let executable = URL(fileURLWithPath: "/private/tmp/staged/forge3")
-
-        let exactResult = try await probe.probe(executableURL: executable, expectedVersion: version)
-        let mismatchResult = try await probe.probe(executableURL: executable, expectedVersion: version)
-        XCTAssertEqual(exactResult, .succeeded)
-        XCTAssertEqual(
-            mismatchResult,
-            .versionMismatch(expected: "forge3 1.2.3", actual: "forge3 1.2.3 ")
-        )
-        let calls = await runner.calls
-        XCTAssertEqual(calls.count, 2)
-        XCTAssertTrue(calls.allSatisfy { $0.executable == executable })
-        XCTAssertTrue(calls.allSatisfy { $0.arguments == ["--version"] })
-        XCTAssertTrue(calls.allSatisfy { $0.standardOutput == nil })
-        XCTAssertTrue(calls.allSatisfy { $0.maximumStandardOutputBytes == 128 })
-        XCTAssertTrue(calls.allSatisfy { $0.timeout == 0.25 })
-        XCTAssertTrue(calls.allSatisfy { $0.terminationGracePeriod == 0.05 })
+        XCTAssertEqual(fixture.store.installCount, 1)
     }
 
     func testDarwinQuarantineManagerAtomicallyRefreshesPinnedVnodeAndOmitsOnlyQuarantine() throws {
@@ -2218,11 +1691,9 @@ final class RuntimeInstallerTests: XCTestCase {
     }
 
     private func installerFixture(
-        probe: any RuntimeExecutionProbing,
         quarantineManager: any RuntimeQuarantineManaging,
         securityLogger: any RuntimeInstallationSecurityLogging,
         validator: any RuntimeExecutableValidating = StubValidator(),
-        versionInspector: any RuntimeExecutableVersionIdentityInspecting = ExpectedVersionIdentityInspector(),
         signatureInspector: any RuntimeCodeSignatureInspecting = UnsignedRuntimeCodeSignatureInspector(),
         trustPolicy: any RuntimePreExecutionTrustPolicy = TemporaryAdHocRuntimeTrustPolicy(),
         validationTracer: any RuntimeInstallerValidationTracing = NoOpRuntimeInstallerValidationTracer(),
@@ -2246,10 +1717,8 @@ final class RuntimeInstallerTests: XCTestCase {
                 store: store,
                 archive: MockArchive(executable: Data("probe-executable".utf8)),
                 validator: validator,
-                versionInspector: versionInspector,
                 signatureInspector: signatureInspector,
                 trustPolicy: trustPolicy,
-                executionProbe: probe,
                 quarantineManager: quarantineManager,
                 securityLogger: securityLogger,
                 validationTracer: validationTracer,
@@ -2403,44 +1872,6 @@ private final class RecordingValidator: RuntimeExecutableValidating, @unchecked 
         try lock.withLock {
             storedCalls.append((executableURL, expectedArchitecture))
             if !results.isEmpty { try results.removeFirst().get() }
-        }
-    }
-}
-
-private final class ExpectedVersionIdentityInspector: RuntimeExecutableVersionIdentityInspecting, @unchecked Sendable {
-    func inspectVersionIdentity(
-        of executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion,
-        expectedIdentity: RuntimeExecutableIdentity
-    ) throws -> RuntimeExecutableVersionIdentity {
-        try RuntimeExecutableIdentityValidator.validate(executableURL, expected: expectedIdentity)
-        return RuntimeExecutableVersionIdentity(version: expectedVersion)
-    }
-}
-
-private final class RecordingVersionIdentityInspector: RuntimeExecutableVersionIdentityInspecting, @unchecked Sendable {
-    private let lock = NSLock()
-    private var results: [Result<RuntimeExecutableVersionIdentity, RuntimeInstallerError>]
-    private var storedCalls: [(URL, RuntimeReleaseVersion, RuntimeExecutableIdentity)] = []
-
-    init(_ results: [Result<RuntimeExecutableVersionIdentity, RuntimeInstallerError>]) {
-        self.results = results
-    }
-
-    var calls: [(URL, RuntimeReleaseVersion, RuntimeExecutableIdentity)] { lock.withLock { storedCalls } }
-
-    func inspectVersionIdentity(
-        of executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion,
-        expectedIdentity: RuntimeExecutableIdentity
-    ) throws -> RuntimeExecutableVersionIdentity {
-        try RuntimeExecutableIdentityValidator.validate(executableURL, expected: expectedIdentity)
-        return try lock.withLock {
-            storedCalls.append((executableURL, expectedVersion, expectedIdentity))
-            if results.isEmpty {
-                return RuntimeExecutableVersionIdentity(version: expectedVersion)
-            }
-            return try results.removeFirst().get()
         }
     }
 }
@@ -2803,58 +2234,6 @@ private final class MockStore: RuntimeStoreManaging, @unchecked Sendable {
             return installed
         }
     }
-}
-
-private final class ScriptedExecutionProbe: RuntimeExecutionProbing, @unchecked Sendable {
-    private let lock = NSLock()
-    private var results: [RuntimeExecutionProbeResult]
-    private var storedCallCount = 0
-
-    init(_ results: [RuntimeExecutionProbeResult]) {
-        self.results = results
-    }
-
-    var callCount: Int { lock.withLock { storedCallCount } }
-
-    func probe(
-        executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion
-    ) async throws -> RuntimeExecutionProbeResult {
-        try Task.checkCancellation()
-        return lock.withLock {
-            storedCallCount += 1
-            return results.isEmpty ? .failed("unexpected probe call") : results.removeFirst()
-        }
-    }
-}
-
-private actor HoldingExecutionProbe: RuntimeExecutionProbing {
-    private var started = false
-    private var cancelled = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-
-    func probe(
-        executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion
-    ) async throws -> RuntimeExecutionProbeResult {
-        started = true
-        startWaiters.forEach { $0.resume() }
-        startWaiters.removeAll()
-        do {
-            try await Task.sleep(nanoseconds: 3_600_000_000_000)
-        } catch {
-            cancelled = true
-            throw RuntimeInstallerError.cancelled
-        }
-        return .succeeded
-    }
-
-    func waitUntilStarted() async {
-        if started { return }
-        await withCheckedContinuation { startWaiters.append($0) }
-    }
-
-    func wasCancelled() -> Bool { cancelled }
 }
 
 private final class RecordingQuarantineManager: RuntimeQuarantineManaging, @unchecked Sendable {

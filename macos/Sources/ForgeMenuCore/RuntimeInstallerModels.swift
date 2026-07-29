@@ -35,11 +35,7 @@ public enum RuntimeInstallerError: LocalizedError, Equatable {
     case processFailure(String)
     case processLaunchDenied(String)
     case processTimeout
-    case invalidExecutableVersionIdentity(String)
-    case executableVersionIdentityMismatch(expected: RuntimeReleaseVersion, actual: RuntimeReleaseVersion)
     case developerIDAuthenticationFailed(String)
-    case runtimeProbeFailed(String)
-    case runtimeProbeVersionMismatch(expected: String, actual: String)
     case quarantineRemovalFailed(String)
     case filesystem(operation: String, path: String, failure: RuntimeFilesystemFailure)
     case cancelled
@@ -71,14 +67,8 @@ public enum RuntimeInstallerError: LocalizedError, Equatable {
         case .processFailure(let message): return "Could not run a forge3 installation subprocess: \(message)"
         case .processLaunchDenied(let message): return "macOS denied launching the staged forge3 executable: \(message)"
         case .processTimeout: return "A forge3 installation subprocess timed out."
-        case .invalidExecutableVersionIdentity(let message):
-            return "The downloaded forge3 executable has invalid embedded version identity: \(message)"
-        case .executableVersionIdentityMismatch(let expected, let actual):
-            return "The downloaded forge3 executable embeds version \(actual.rawValue), expected \(expected.rawValue)."
         case .developerIDAuthenticationFailed(let message):
             return "The downloaded Developer ID forge3 executable could not be authenticated: \(message)"
-        case .runtimeProbeFailed(let message): return "The downloaded forge3 executable failed its execution probe: \(message)"
-        case .runtimeProbeVersionMismatch(let expected, let actual): return "The downloaded forge3 executable reported an unexpected version (expected \(expected), got \(actual))."
         case .quarantineRemovalFailed(let message): return "Could not remove quarantine from the staged forge3 executable: \(message)"
         case .filesystem(let operation, let path, let failure):
             return "Could not \(operation) at \(path): \(failure.description)."
@@ -288,33 +278,20 @@ public struct RuntimeInstallerProgressDelivery: Equatable, Sendable {
     }
 }
 
-public struct RuntimeExecutableVersionIdentity: Equatable, Sendable {
-    public let version: RuntimeReleaseVersion
-
-    public init(version: RuntimeReleaseVersion) {
-        self.version = version
-    }
-
-    public var exactVersionOutput: String { "forge3 \(version.rawValue)" }
-}
-
 public struct RuntimePreExecutionTrustContext: Equatable, Sendable {
     public let signature: RuntimeCodeSignatureInspection
     public let hasQuarantine: Bool
-    public let versionIdentity: RuntimeExecutableVersionIdentity
     public let architecture: RuntimeArchitecture
     public let executableIdentity: RuntimeExecutableIdentity
 
     public init(
         signature: RuntimeCodeSignatureInspection,
         hasQuarantine: Bool,
-        versionIdentity: RuntimeExecutableVersionIdentity,
         architecture: RuntimeArchitecture,
         executableIdentity: RuntimeExecutableIdentity
     ) {
         self.signature = signature
         self.hasQuarantine = hasQuarantine
-        self.versionIdentity = versionIdentity
         self.architecture = architecture
         self.executableIdentity = executableIdentity
     }
@@ -322,20 +299,17 @@ public struct RuntimePreExecutionTrustContext: Equatable, Sendable {
     public init(
         signatureClass: RuntimeCodeSignatureClass,
         hasQuarantine: Bool,
-        versionIdentity: RuntimeExecutableVersionIdentity,
         architecture: RuntimeArchitecture,
         executableIdentity: RuntimeExecutableIdentity
     ) {
         self.init(
             signature: RuntimeCodeSignatureInspection(signatureClass: signatureClass),
             hasQuarantine: hasQuarantine,
-            versionIdentity: versionIdentity,
             architecture: architecture,
             executableIdentity: executableIdentity
         )
     }
 
-    public var version: RuntimeReleaseVersion { versionIdentity.version }
     public var signatureClass: RuntimeCodeSignatureClass { signature.signatureClass }
 }
 
@@ -347,17 +321,14 @@ public enum RuntimePreExecutionTrustDecision: Equatable, Sendable {
 public enum RuntimeInstallerValidationEvent: Equatable, Sendable {
     case initialMachOValidated
     case initialIdentityAndHashValidated
-    case initialVersionIdentityValidated
     case initialSignatureClassInspected
     case initialQuarantineInspected
     case trustPolicyEvaluated
     case stagedVnodeRefreshed
     case postRefreshIdentityAndHashValidated
     case postRefreshMachOValidated
-    case postRefreshVersionIdentityValidated
     case postRefreshSignatureClassInspected
     case postRefreshQuarantineValidated
-    case executionProbeStarted
 }
 
 public struct RuntimeExecutableIdentity: Equatable, Sendable {
