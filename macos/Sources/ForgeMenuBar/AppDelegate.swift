@@ -203,7 +203,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .enabled: return .enabled
         case .notRegistered: return .disabled
         case .requiresApproval: return .requiresApproval
-        case .notFound: return .unavailable("The app must be installed in Applications.")
+        // `.notFound` is what macOS reports for a main-app login item that has
+        // never been registered, so it must remain toggleable; if registration
+        // is truly impossible, `register()` throws and the error alert explains.
+        case .notFound: return .disabled
         @unknown default: return .unavailable("macOS returned an unknown login item status.")
         }
     }
