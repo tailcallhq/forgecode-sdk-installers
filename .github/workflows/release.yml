@@ -260,9 +260,13 @@ jobs:
           dist="macos/dist/$MODE"
           rm -rf release-artifacts
           mkdir -p release-artifacts
+          # Only the DMG and the Sparkle feed are published. manifest.txt and
+          # SHA256SUMS stay build-internal: they are inputs to
+          # verify-release.sh, which has already run against this build, and
+          # SHA256SUMS mostly hashes files *inside* the bundle, which a
+          # downloader cannot check without mounting the DMG first. GitHub
+          # exposes a SHA-256 digest for every release asset anyway.
           cp "$dist/$DMG_NAME.dmg" release-artifacts/
-          cp "$dist/manifest.txt" release-artifacts/
-          cp "$dist/SHA256SUMS" release-artifacts/
           if [ -f "$dist/appcast.xml" ]; then
             cp "$dist/appcast.xml" release-artifacts/
           fi
@@ -330,8 +334,6 @@ jobs:
           cd release-artifacts
           expected=(
             "$DMG_FILE"
-            "manifest.txt"
-            "SHA256SUMS"
           )
           if [ "$HAS_APPCAST" = "true" ]; then
             expected+=("appcast.xml")
