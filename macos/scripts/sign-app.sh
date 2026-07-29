@@ -14,10 +14,8 @@ team_id=${SIGNING_TEAM_ID:-}
 plutil -lint "$ENTITLEMENTS_FILE" >/dev/null
 security find-identity -v -p codesigning | grep -F "$identity" >/dev/null || fail "configured signing identity is not available: $identity"
 
-# Sign deepest nested executable first, then seal the outer bundle. Avoid
-# --deep: explicit nesting makes omissions visible and verification reliable.
-codesign --force --timestamp --options runtime --sign "$identity" \
-  "$APP_BUNDLE/Contents/Helpers/$HELPER_EXECUTABLE"
+# Sign the executable explicitly, then seal the outer bundle. Avoid --deep so
+# any future nested code must be added deliberately and remains visible.
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS_FILE" --sign "$identity" \
   "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS_FILE" --sign "$identity" \
@@ -31,6 +29,8 @@ fi
 actual_entitlements="$ARTIFACTS_DIR/signed-app-entitlements.plist"
 codesign -d --entitlements :- "$APP_BUNDLE" > "$actual_entitlements" 2>/dev/null
 plutil -lint "$actual_entitlements" >/dev/null
+verify_app_inventory "$APP_BUNDLE"
 write_manifest
+verify_manifest
 safe_remove "$CHECKSUMS_PATH"
 printf '%s\n' "$APP_BUNDLE"

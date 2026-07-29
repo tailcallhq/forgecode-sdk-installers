@@ -28,6 +28,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onOpenLoginItems: (() -> Void)?
     var onRefresh: (() -> Void)?
     var onRestart: (() -> Void)?
+    var onRetryInstallation: (() -> Void)?
     var onOpenLogs: (() -> Void)?
     var onConfigureConsoleOrigin: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
@@ -47,6 +48,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let endpointLabel = NSTextField(labelWithString: "")
     private let openFrontendButton = NSButton()
     private let refreshButton = NSButton()
+    private let installationProgress = NSProgressIndicator()
 
     private var snapshot = ServiceSnapshot()
     private var loginItemState: LoginItemState = .disabled
@@ -294,6 +296,20 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     /// The default body: the conversation disclosure row followed by the
     /// commands that previously lived behind the overflow button.
     private func buildCommandBody() {
+        if let progress = presentation.installationProgress {
+            bodyStack.addArrangedSubview(installationProgressView(progress))
+            bodyStack.addArrangedSubview(bodySeparator())
+        } else if presentation.retryInstallationEnabled {
+            bodyStack.addArrangedSubview(noteView(presentation.actionableError ?? "Runtime installation failed."))
+            bodyStack.addArrangedSubview(commandRow(
+                title: "Retry Runtime Installation",
+                symbol: "arrow.clockwise",
+                action: #selector(retryInstallationCommand),
+                isProminent: true
+            ))
+            bodyStack.addArrangedSubview(bodySeparator())
+        }
+
         bodyStack.addArrangedSubview(conversationsDisclosureRow())
         bodyStack.addArrangedSubview(bodySeparator())
 
@@ -301,14 +317,16 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             title: "Run ForgeCode Service",
             symbol: preferences.runService ? "checkmark.circle.fill" : "circle",
             action: #selector(toggleRunServiceCommand),
-            isOn: preferences.runService
+            isOn: preferences.runService,
+            isToggle: true
         ))
         bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
             symbol: loginItemState == .enabled ? "checkmark.circle.fill" : "circle",
             action: #selector(toggleLaunchAtLoginCommand),
             isOn: loginItemState == .enabled,
-            isEnabled: loginItemState != .requiresApproval
+            isEnabled: launchAtLoginAvailable,
+            isToggle: true
         ))
         if loginItemState == .requiresApproval {
             bodyStack.addArrangedSubview(commandRow(
@@ -369,6 +387,52 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func installationProgressView(
+        _ progress: PopoverPresentation.InstallationProgress
+    ) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 10)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        installationProgress.minValue = 0
+        installationProgress.maxValue = 1
+        installationProgress.controlSize = .small
+        installationProgress.style = .bar
+        installationProgress.translatesAutoresizingMaskIntoConstraints = false
+        switch progress {
+        case .indeterminate(let accessibilityLabel):
+            label.stringValue = accessibilityLabel
+            installationProgress.isIndeterminate = true
+            installationProgress.startAnimation(nil)
+            installationProgress.setAccessibilityLabel(accessibilityLabel)
+            installationProgress.setAccessibilityValue("In progress")
+        case .determinate(let value, let accessibilityLabel):
+            let bounded = min(1, max(0, value))
+            label.stringValue = "Downloading runtime — \(Int(bounded * 100))%"
+            installationProgress.stopAnimation(nil)
+            installationProgress.isIndeterminate = false
+            installationProgress.doubleValue = bounded
+            installationProgress.setAccessibilityLabel(accessibilityLabel)
+            installationProgress.setAccessibilityValue(bounded)
+        }
+        container.addSubview(label)
+        container.addSubview(installationProgress)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
+            container.heightAnchor.constraint(equalToConstant: 38),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.labelColumnInset),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.rowInset),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            installationProgress.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            installationProgress.trailingAnchor.constraint(equalTo: label.trailingAnchor),
+            installationProgress.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 4)
+        ])
+        return container
+    }
+
     private func conversationsDisclosureRow() -> NSView {
         commandRow(
             title: "Conversations",
@@ -386,6 +450,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         action: Selector,
         isOn: Bool = false,
         isEnabled: Bool = true,
+        isToggle: Bool = false,
         trailingText: String? = nil,
         isProminent: Bool = false,
         showsDisclosure: Bool = false
@@ -401,7 +466,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             showsDisclosure: showsDisclosure
         )
         row.toolTip = title
-        row.setAccessibilityLabel(title)
+        row.configureAccessibility(
+            label: title,
+            value: isToggle ? (isOn ? "On" : "Off") : trailingText,
+            enabled: isEnabled
+        )
         row.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth).isActive = true
         return row
     }
@@ -603,8 +672,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     // Toggles keep the popover open so the resulting state change is visible.
     @objc private func toggleRunServiceCommand() { onRunServiceChanged?(!preferences.runService) }
-    @objc private func toggleLaunchAtLoginCommand() { onLaunchAtLoginChanged?(loginItemState != .enabled) }
+    @objc private func toggleLaunchAtLoginCommand() {
+        guard launchAtLoginAvailable else { return }
+        onLaunchAtLoginChanged?(loginItemState != .enabled)
+    }
     @objc private func restartCommand() { onRestart?() }
+    @objc private func retryInstallationCommand() { onRetryInstallation?() }
 
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
@@ -627,6 +700,13 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     private var launchAtLoginTitle: String {
         loginItemState == .requiresApproval ? "Launch at Login — Approval Required" : "Launch at Login"
+    }
+
+    private var launchAtLoginAvailable: Bool {
+        switch loginItemState {
+        case .enabled, .disabled: return true
+        case .requiresApproval, .unavailable: return false
+        }
     }
 
     private func statusSymbol(for tone: PopoverPresentation.ServiceTone) -> String {
@@ -671,6 +751,7 @@ private final class CommandRowView: NSView {
     var isEnabled = true {
         didSet {
             alphaValue = isEnabled ? 1 : 0.35
+            setAccessibilityEnabled(isEnabled)
             if !isEnabled { isHovered = false }
         }
     }
@@ -682,6 +763,8 @@ private final class CommandRowView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
         buildLayout()
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
     }
 
     @available(*, unavailable)
@@ -743,6 +826,12 @@ private final class CommandRowView: NSView {
     private var chevronTrailingConstraint: NSLayoutConstraint?
     private var plainTrailingConstraint: NSLayoutConstraint?
 
+    func configureAccessibility(label: String, value: String?, enabled: Bool) {
+        setAccessibilityLabel(label)
+        setAccessibilityValue(value)
+        setAccessibilityEnabled(enabled)
+    }
+
     func configure(
         symbol: String,
         title: String,
@@ -776,18 +865,58 @@ private final class CommandRowView: NSView {
         trackingAreaRef = area
     }
 
+    override var acceptsFirstResponder: Bool { isEnabled }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { needsDisplay = true }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { needsDisplay = true }
+        return resigned
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        if event.keyCode == 36 || event.keyCode == 76 || event.charactersIgnoringModifiers == " " {
+            performAction()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        performAction()
+        return true
+    }
+
     override func mouseEntered(with event: NSEvent) { if isEnabled { isHovered = true } }
     override func mouseExited(with event: NSEvent) { isHovered = false }
 
     override func mouseUp(with event: NSEvent) {
         guard isEnabled, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
-        if let target { NSApp.sendAction(action, to: target, from: self) }
+        performAction()
+    }
+
+    private func performAction() {
+        guard isEnabled, let target else { return }
+        NSApp.sendAction(action, to: target, from: self)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard isHovered else { return }
         let highlight = bounds.insetBy(dx: 4, dy: 1)
+        if window?.firstResponder === self {
+            NSColor.keyboardFocusIndicatorColor.setStroke()
+            let focusPath = NSBezierPath(roundedRect: highlight, xRadius: 5, yRadius: 5)
+            focusPath.lineWidth = 2
+            focusPath.stroke()
+        }
+        guard isHovered else { return }
         NSColor.selectedContentBackgroundColor.withAlphaComponent(0.28).setFill()
         NSBezierPath(roundedRect: highlight, xRadius: 5, yRadius: 5).fill()
     }

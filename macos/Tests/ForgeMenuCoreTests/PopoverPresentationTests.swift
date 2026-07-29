@@ -162,6 +162,85 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertFalse(failed.refreshEnabled)
     }
 
+    func testInstallationPhasesAreCompactBoundedAndKeepRefreshConversationOnly() {
+        let phases: [(RuntimeInstallationPhase, String)] = [
+            (.resolving, "Resolving runtime"),
+            (.downloading(progress: -0.5), "Downloading 0%"),
+            (.downloading(progress: 1.5), "Downloading 100%"),
+            (.verifying, "Verifying runtime"),
+            (.installing, "Installing runtime"),
+            (.ready, "Runtime ready")
+        ]
+
+        for (phase, detail) in phases {
+            let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .installing(phase)))
+            XCTAssertEqual(presentation.serviceDetail, detail)
+            XCTAssertEqual(presentation.serviceTone, .active)
+            XCTAssertFalse(presentation.refreshEnabled)
+            XCTAssertTrue(presentation.restartEnabled)
+            XCTAssertFalse(presentation.canOpenFrontend)
+            XCTAssertEqual(presentation.conversationsSummary, "Installing…")
+        }
+
+        XCTAssertEqual(
+            PopoverPresentation.make(snapshot: ServiceSnapshot(
+                phase: .installing(.downloading(progress: -2))
+            )).installationProgress,
+            .determinate(value: 0, label: "Downloading ForgeCode runtime, 0 percent")
+        )
+        XCTAssertEqual(
+            PopoverPresentation.make(snapshot: ServiceSnapshot(
+                phase: .installing(.downloading(progress: 4))
+            )).installationProgress,
+            .determinate(value: 1, label: "Downloading ForgeCode runtime, 100 percent")
+        )
+    }
+
+    func testNonDownloadInstallationPhasesExposeTextualIndeterminateProgress() {
+        let expected: [(RuntimeInstallationPhase, PopoverPresentation.InstallationProgress)] = [
+            (.resolving, .indeterminate(label: "Resolving ForgeCode runtime")),
+            (.verifying, .indeterminate(label: "Verifying ForgeCode runtime")),
+            (.installing, .indeterminate(label: "Installing ForgeCode runtime")),
+            (.ready, .indeterminate(label: "Starting ForgeCode service"))
+        ]
+        for (phase, progress) in expected {
+            XCTAssertEqual(
+                PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .installing(phase))).installationProgress,
+                progress
+            )
+        }
+    }
+
+    func testInstallationFailureOffersRetryWithConciseError() {
+        let message = "Runtime download failed. Check your connection and retry."
+        let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(
+            phase: .installationFailed(.download)
+        ))
+        XCTAssertEqual(presentation.serviceDetail, "Install failed")
+        XCTAssertEqual(presentation.bodyMessage, "Runtime installation failed")
+        XCTAssertEqual(presentation.actionableError, message)
+        XCTAssertTrue(presentation.retryInstallationEnabled)
+        XCTAssertFalse(presentation.restartEnabled)
+        XCTAssertFalse(presentation.refreshEnabled)
+        XCTAssertNil(presentation.installationProgress)
+    }
+
+    func testPermissionFailurePresentationPreservesIdentityAndIsActionable() {
+        let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(
+            phase: .installationFailed(.filesystem(.permissionDenied))
+        ))
+
+        XCTAssertEqual(presentation.serviceDetail, "Install failed")
+        XCTAssertEqual(presentation.bodyMessage, "Runtime installation failed")
+        XCTAssertEqual(
+            presentation.actionableError,
+            "Runtime folder access was denied. Check permissions and retry."
+        )
+        XCTAssertTrue(presentation.retryInstallationEnabled)
+        XCTAssertFalse(presentation.restartEnabled)
+        XCTAssertFalse(presentation.refreshEnabled)
+    }
+
     func testDisabledAndStoppedDoNotExposeConversationRows() {
         for phase in [ServicePhase.disabled, .stopped] {
             let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(

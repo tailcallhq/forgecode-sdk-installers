@@ -1,16 +1,12 @@
 # macOS/SwiftPM-specific ignores. Repository-wide rules (dist/, signing
 # material, OS cruft) live in ../.gitignore.
 
-# Swift Package Manager build output. Package.resolved is deliberately NOT
-# ignored: committing it pins exact dependency revisions so CI and local
-# builds resolve identically.
+# Swift Package Manager build output. There is no Package.resolved while the
+# package has no dependencies; if SwiftPM creates one later it must be reviewed
+# rather than ignored so packaging can reject remote dependency resolution.
 .build/
 .swiftpm/
 
-# Intermediate build products: universal binaries, generated icons, DMG
-# staging, verification mounts, and packaging logs.
+# Intermediate build products: universal binaries, generated icons, atomic
+# app/DMG stages, verification mounts, focused fixtures, and packaging logs.
 .build-artifacts/
-
-# Cache of forge3 release archives downloaded by scripts/fetch-forge3.sh.
-# Reproducible from the pinned tag + SHA-256 in scripts/versions.sh.
-Vendor/

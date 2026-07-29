@@ -27,15 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let paths = try RuntimePaths.resolve()
+            let runtimeRoot = RuntimeStore.defaultRoot()
+            let runtimeLease = RuntimeStoreLease(rootURL: runtimeRoot)
+            let runtimeInstaller = RuntimeInstaller(rootURL: runtimeRoot)
             let processHost = ForgeProcessHost(
-                configuration: .init(
-                    executableURL: paths.forgeExecutable,
-                    logURL: paths.serviceLog
-                ),
-                logger: logger
+                configuration: .init(logURL: paths.serviceLog),
+                logger: logger,
+                lease: runtimeLease
             )
             let supervisor = ServiceSupervisor(
                 processHost: processHost,
+                runtimeInstaller: runtimeInstaller,
                 clientFactory: { endpoint in WebSocketRPCClient(endpoint: endpoint.webSocketURL) },
                 logger: logger
             )
@@ -53,7 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             serviceController.onSnapshotChanged = { [weak self] snapshot in
                 guard let self else { return }
                 self.popoverController.update(snapshot: snapshot, loginItemState: self.loginItemState)
-                self.updateStatusIcon(snapshot.phase)
+                self.updateStatusItem(snapshot)
             }
             synchronizeLoginPreference()
             popoverController.update(snapshot: serviceController.snapshot, loginItemState: loginItemState)
@@ -99,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
         popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
         popoverController.onRestart = { [weak self] in self?.serviceController.restart() }
+        popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
         popoverController.onOpenLogs = { [weak self] in
             do {
                 try FileManager.default.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
@@ -270,14 +273,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.toggle(relativeTo: sender)
     }
 
-    private func updateStatusIcon(_ phase: ServicePhase) {
-        statusItem.button?.image = ForgeCodeLogo.statusImage()
-        statusItem.button?.image?.isTemplate = true
-        switch phase {
-        case .ready: statusItem.button?.contentTintColor = nil
-        case .starting, .restarting: statusItem.button?.contentTintColor = .controlAccentColor
-        case .failed: statusItem.button?.contentTintColor = .systemOrange
-        case .disabled, .stopped: statusItem.button?.contentTintColor = .secondaryLabelColor
+    private func updateStatusItem(_ snapshot: ServiceSnapshot) {
+        guard let button = statusItem.button else { return }
+        button.image = ForgeCodeLogo.statusImage()
+        button.image?.isTemplate = true
+        let presentation = PopoverPresentation.make(snapshot: snapshot)
+        let accessibilityStatus = "\(presentation.serviceTitle), \(presentation.serviceDetail)"
+        button.setAccessibilityLabel(accessibilityStatus)
+        button.setAccessibilityHelp("Open ForgeCode status")
+        button.toolTip = accessibilityStatus
+        switch snapshot.phase {
+        case .ready: button.contentTintColor = nil
+        case .installing, .starting, .restarting: button.contentTintColor = .controlAccentColor
+        case .installationFailed, .failed: button.contentTintColor = .systemOrange
+        case .disabled, .stopped: button.contentTintColor = .secondaryLabelColor
         }
     }
 
