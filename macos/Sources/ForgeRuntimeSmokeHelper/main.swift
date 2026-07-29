@@ -6,7 +6,6 @@ private struct SmokeResult: Codable {
     let version: String?
     let architecture: String?
     let executablePath: String?
-    let expectedVersionOutput: String?
     let cachedRuntimeMatched: Bool?
     let error: String?
 }
@@ -27,23 +26,14 @@ private enum ForgeRuntimeSmokeHelper {
             let installer = RuntimeInstaller(rootURL: rootURL)
             let runtime = try await installer.installLatest()
             guard FileManager.default.isExecutableFile(atPath: runtime.executableURL.path) else {
-                throw RuntimeInstallerError.runtimeProbeFailed("installed runtime is not executable")
+                throw RuntimeInstallerError.untrustedStoreItem("installed runtime is not executable")
             }
-
-            let probeResult = try await BoundedRuntimeExecutionProbe(
-                processRunner: POSIXRuntimeProcessRunner(),
-                timeout: 15,
-                terminationGracePeriod: 1,
-                maximumOutputBytes: 4_096
-            ).probe(installedRuntime: runtime)
-            guard probeResult == .succeeded else {
-                throw RuntimeInstallerError.runtimeProbeFailed("post-install exact version probe returned \(probeResult)")
-            }
+            try runtime.validateExecutableIdentity()
 
             let restartedInstaller = RuntimeInstaller(rootURL: rootURL)
             let cached = try await restartedInstaller.installedCurrentRuntime()
             guard cached == runtime else {
-                throw RuntimeInstallerError.runtimeProbeFailed("cold-restarted current runtime did not match the activated runtime")
+                throw RuntimeInstallerError.untrustedStoreItem("cold-restarted current runtime did not match the activated runtime")
             }
             try cached?.validateExecutableIdentity()
             result = SmokeResult(
@@ -51,7 +41,6 @@ private enum ForgeRuntimeSmokeHelper {
                 version: runtime.version.rawValue,
                 architecture: runtime.architecture.rawValue,
                 executablePath: runtime.executableURL.path,
-                expectedVersionOutput: "forge3 \(runtime.version.rawValue)",
                 cachedRuntimeMatched: true,
                 error: nil
             )
@@ -62,7 +51,6 @@ private enum ForgeRuntimeSmokeHelper {
                 version: nil,
                 architecture: nil,
                 executablePath: nil,
-                expectedVersionOutput: nil,
                 cachedRuntimeMatched: nil,
                 error: String(describing: error)
             )

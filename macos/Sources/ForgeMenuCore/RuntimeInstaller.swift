@@ -609,10 +609,8 @@ public actor RuntimeInstaller: RuntimeInstalling {
         public let store: any RuntimeStoreManaging
         public let archive: any RuntimeArchiveHandling
         public let validator: any RuntimeExecutableValidating
-        public let versionInspector: any RuntimeExecutableVersionIdentityInspecting
         public let signatureInspector: any RuntimeCodeSignatureInspecting
         public let trustPolicy: any RuntimePreExecutionTrustPolicy
-        public let executionProbe: any RuntimeExecutionProbing
         public let quarantineManager: any RuntimeQuarantineManaging
         public let securityLogger: any RuntimeInstallationSecurityLogging
         public let validationTracer: any RuntimeInstallerValidationTracing
@@ -626,10 +624,8 @@ public actor RuntimeInstaller: RuntimeInstalling {
             store: any RuntimeStoreManaging,
             archive: any RuntimeArchiveHandling,
             validator: any RuntimeExecutableValidating,
-            versionInspector: any RuntimeExecutableVersionIdentityInspecting = Forge3MachOVersionIdentityInspector(),
             signatureInspector: (any RuntimeCodeSignatureInspecting)? = nil,
             trustPolicy: any RuntimePreExecutionTrustPolicy = TemporaryAdHocRuntimeTrustPolicy(),
-            executionProbe: any RuntimeExecutionProbing = BoundedRuntimeExecutionProbe(),
             quarantineManager: any RuntimeQuarantineManaging = DarwinRuntimeQuarantineManager(),
             securityLogger: any RuntimeInstallationSecurityLogging = AppRuntimeInstallationSecurityLogger(),
             validationTracer: any RuntimeInstallerValidationTracing = NoOpRuntimeInstallerValidationTracer(),
@@ -642,12 +638,10 @@ public actor RuntimeInstaller: RuntimeInstalling {
             self.store = store
             self.archive = archive
             self.validator = validator
-            self.versionInspector = versionInspector
             self.signatureInspector = signatureInspector
                 ?? (validator as? any RuntimeCodeSignatureInspecting)
                 ?? UnsignedRuntimeCodeSignatureInspector()
             self.trustPolicy = trustPolicy
-            self.executionProbe = executionProbe
             self.quarantineManager = quarantineManager
             self.securityLogger = securityLogger
             self.validationTracer = validationTracer
@@ -694,10 +688,8 @@ public actor RuntimeInstaller: RuntimeInstalling {
             store: RuntimeStore(rootURL: rootURL, validator: validator, lease: lease),
             archive: SafeTarXZArchiveHandler(),
             validator: validator,
-            versionInspector: Forge3MachOVersionIdentityInspector(),
             signatureInspector: validator,
             trustPolicy: TemporaryAdHocRuntimeTrustPolicy(),
-            executionProbe: BoundedRuntimeExecutionProbe(lease: lease),
             quarantineManager: DarwinRuntimeQuarantineManager(),
             securityLogger: AppRuntimeInstallationSecurityLogger(),
             developerIDAuthenticationPolicy: RuntimeDeveloperIDAuthenticationPolicy(
@@ -1066,15 +1058,8 @@ public actor RuntimeInstaller: RuntimeInstalling {
             expectedSHA256: executableChecksum
         )
         dependencies.validationTracer.record(.initialIdentityAndHashValidated)
-        let versionIdentity = try dependencies.versionInspector.inspectVersionIdentity(
-            of: executable,
-            expectedVersion: version,
-            expectedIdentity: validatedIdentity
-        )
-        dependencies.validationTracer.record(.initialVersionIdentityValidated)
         let executionIdentity = try Self.applyPreExecutionTrustPolicy(
             executableURL: executable,
-            versionIdentity: versionIdentity,
             architecture: architecture,
             validatedIdentity: validatedIdentity,
             dependencies: dependencies
@@ -1082,12 +1067,6 @@ public actor RuntimeInstaller: RuntimeInstalling {
         try RuntimeExecutableIdentityValidator.validate(executable, expected: executionIdentity)
         stagingLease?.release()
         stagingLeaseReleased = true
-        try await Self.verifyStagedExecution(
-            executableURL: executable,
-            version: version,
-            expectedIdentity: executionIdentity,
-            dependencies: dependencies
-        )
         let receipt = RuntimeStoreReceipt(
             version: version,
             architecture: architecture,
@@ -1107,7 +1086,6 @@ public actor RuntimeInstaller: RuntimeInstalling {
 
     private static func applyPreExecutionTrustPolicy(
         executableURL: URL,
-        versionIdentity: RuntimeExecutableVersionIdentity,
         architecture: RuntimeArchitecture,
         validatedIdentity: RuntimeExecutableIdentity,
         dependencies: Dependencies
@@ -1130,7 +1108,6 @@ public actor RuntimeInstaller: RuntimeInstalling {
         let context = RuntimePreExecutionTrustContext(
             signature: signature,
             hasQuarantine: hasQuarantine,
-            versionIdentity: versionIdentity,
             architecture: architecture,
             executableIdentity: validatedIdentity
         )
@@ -1158,17 +1135,6 @@ public actor RuntimeInstaller: RuntimeInstalling {
                 expectedArchitecture: architecture
             )
             dependencies.validationTracer.record(.postRefreshMachOValidated)
-            let refreshedVersionIdentity = try dependencies.versionInspector.inspectVersionIdentity(
-                of: executableURL,
-                expectedVersion: versionIdentity.version,
-                expectedIdentity: refreshedIdentity
-            )
-            guard refreshedVersionIdentity == versionIdentity else {
-                throw RuntimeInstallerError.invalidExecutableVersionIdentity(
-                    "the refreshed staged executable changed its exact version identity"
-                )
-            }
-            dependencies.validationTracer.record(.postRefreshVersionIdentityValidated)
             let refreshedSignature = try dependencies.signatureInspector.inspectSignature(of: executableURL)
             guard refreshedSignature.signatureClass == .adHoc else {
                 throw RuntimeInstallerError.invalidMachO(
@@ -1188,36 +1154,6 @@ public actor RuntimeInstaller: RuntimeInstalling {
             dependencies.validationTracer.record(.postRefreshQuarantineValidated)
             dependencies.securityLogger.log(.refreshedAdHocQuarantinedStagedExecutable)
             return refreshedIdentity
-        }
-    }
-
-    private static func verifyStagedExecution(
-        executableURL: URL,
-        version: RuntimeReleaseVersion,
-        expectedIdentity: RuntimeExecutableIdentity,
-        dependencies: Dependencies
-    ) async throws {
-        try Task.checkCancellation()
-        dependencies.validationTracer.record(.executionProbeStarted)
-        let result = try await dependencies.executionProbe.probe(
-            executableURL: executableURL,
-            expectedVersion: version,
-            expectedIdentity: expectedIdentity
-        )
-        try Task.checkCancellation()
-        switch result {
-        case .succeeded:
-            return
-        case .timedOut:
-            throw RuntimeInstallerError.runtimeProbeFailed("forge3 --version timed out")
-        case .executionUnavailable(let message):
-            throw RuntimeInstallerError.runtimeProbeFailed(
-                "forge3 --version could not launch: \(message)"
-            )
-        case .failed(let message):
-            throw RuntimeInstallerError.runtimeProbeFailed(message)
-        case .versionMismatch(let expected, let actual):
-            throw RuntimeInstallerError.runtimeProbeVersionMismatch(expected: expected, actual: actual)
         }
     }
 

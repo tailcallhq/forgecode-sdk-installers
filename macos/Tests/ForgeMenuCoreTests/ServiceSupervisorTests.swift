@@ -331,26 +331,6 @@ private final class SupervisorRuntimeValidator: RuntimeExecutableValidating, @un
     func validate(executableURL: URL, expectedArchitecture: RuntimeArchitecture) throws {}
 }
 
-private struct SupervisorVersionInspector: RuntimeExecutableVersionIdentityInspecting {
-    func inspectVersionIdentity(
-        of executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion,
-        expectedIdentity: RuntimeExecutableIdentity
-    ) throws -> RuntimeExecutableVersionIdentity {
-        try RuntimeExecutableIdentityValidator.validate(executableURL, expected: expectedIdentity)
-        return RuntimeExecutableVersionIdentity(version: expectedVersion)
-    }
-}
-
-private struct SupervisorExecutionProbe: RuntimeExecutionProbing {
-    func probe(
-        executableURL: URL,
-        expectedVersion: RuntimeReleaseVersion
-    ) async throws -> RuntimeExecutionProbeResult {
-        .succeeded
-    }
-}
-
 private struct SupervisorQuarantineManager: RuntimeQuarantineManaging {
     func hasQuarantine(
         at executableURL: URL,
@@ -1025,8 +1005,6 @@ final class ServiceSupervisorTests: XCTestCase {
                 store: store,
                 archive: SupervisorRuntimeArchive(executable: Data("forge3-fixture".utf8)),
                 validator: validator,
-                versionInspector: SupervisorVersionInspector(),
-                executionProbe: SupervisorExecutionProbe(),
                 quarantineManager: SupervisorQuarantineManager()
             )
         )

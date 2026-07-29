@@ -8,12 +8,11 @@ final class LiveRuntimeSmokeTests: XCTestCase {
         let version: String?
         let architecture: String?
         let executablePath: String?
-        let expectedVersionOutput: String?
         let cachedRuntimeMatched: Bool?
         let error: String?
     }
 
-    func testPublicFirstInstallAndLaunchSmoke() throws {
+    func testPublicFirstInstallAndCacheSmoke() throws {
         guard ProcessInfo.processInfo.environment["FORGE_LIVE_RUNTIME_SMOKE"] == "1" else {
             throw XCTSkip("Set FORGE_LIVE_RUNTIME_SMOKE=1 to exercise the real public runtime endpoint.")
         }
@@ -55,7 +54,7 @@ final class LiveRuntimeSmokeTests: XCTestCase {
         }
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: resultURL.path),
-            "LaunchServices smoke helper did not produce a result within 120 seconds"
+            "LaunchServices install/cache smoke helper did not produce a result within 120 seconds"
         )
         guard FileManager.default.fileExists(atPath: resultURL.path) else { return }
 
@@ -64,8 +63,8 @@ final class LiveRuntimeSmokeTests: XCTestCase {
             XCTFail(result.error ?? "smoke helper failed without a diagnostic")
             return
         }
+        XCTAssertEqual(result.version, "0.1.191")
         XCTAssertEqual(result.architecture, RuntimeArchitecture.native.rawValue)
-        XCTAssertEqual(result.expectedVersionOutput, result.version.map { "forge3 \($0)" })
         XCTAssertEqual(result.cachedRuntimeMatched, true)
         if let executablePath = result.executablePath {
             XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executablePath))
