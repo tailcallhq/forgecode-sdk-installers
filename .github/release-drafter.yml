@@ -1,0 +1,94 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "🚀 Features"
+    labels:
+      - "type: feature"
+
+  - title: "📝 Documentation"
+    labels:
+      - "type: docs"
+
+  - title: "🐛 Bug Fixes"
+    labels:
+      - "type: bug"
+      - "type: fix"
+
+  - title: "🧰 Maintenance"
+    labels:
+      - "type: chore"
+      - "type: testing"
+      - "type: refactor"
+
+  - title: "💥 Breaking Changes"
+    labels:
+      - "release: breaking"
+
+  - title: "🔒 Security"
+    labels:
+      - "type: security"
+
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels:
+      - "release: breaking"
+  minor:
+    labels:
+      - "type: feature"
+    commits:
+      - "feat:"
+      - "feature:"
+  patch:
+    labels:
+      - "type: fix"
+      - "type: chore"
+      - "type: docs"
+      - "type: bug"
+      - "type: testing"
+      - "type: refactor"
+    commits:
+      - "fix:"
+      - "perf:"
+      - "chore:"
+      - "docs:"
+      - "refactor:"
+      - "ci:"
+  default: patch
+
+exclude-labels:
+  - "release: skip changelog"
+
+template: |
+  ## Changes
+
+  $CHANGES
+
+autolabeler:
+  - label: "type: feature"
+    title:
+      - /feat/i
+      - /feature/i
+
+  - label: "type: fix"
+    title:
+      - /fix/i
+      - /hotfix/i
+      - /bugfix/i
+      - /patch/i
+
+  - label: "type: chore"
+    title:
+      - /chore/i
+
+  - label: "type: refactor"
+    title:
+      - /refactor/i
+
+  - label: "type: docs"
+    title:
+      - /doc/i
+      - /docs/i

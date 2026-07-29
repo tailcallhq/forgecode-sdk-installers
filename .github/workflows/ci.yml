@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "macos/**"
+      - "versions.sh"
+      - ".github/workflows/ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "macos/**"
+      - "versions.sh"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and Package (unsigned)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Cache Swift build
+        uses: actions/cache@v4
+        with:
+          path: macos/.build
+          key: swift-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/Tests/**') }}
+          restore-keys: |
+            swift-${{ runner.os }}-
+
+      - name: Run tests
+        working-directory: macos
+        run: swift test
+
+      - name: Build unsigned package
+        working-directory: macos
+        run: scripts/package-unsigned.sh
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-dmg
+          path: |
+            macos/dist/unsigned/*.dmg
+            macos/dist/unsigned/manifest.txt
+            macos/dist/unsigned/SHA256SUMS
+          if-no-files-found: error
