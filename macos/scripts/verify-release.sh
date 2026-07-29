@@ -17,6 +17,7 @@ assert_no_packaged_runtime "$APP_BUNDLE" "app bundle"
 verify_info_plist_and_resources "$APP_BUNDLE"
 verify_app_inventory "$APP_BUNDLE"
 validate_macho "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE" arm64 x86_64
+validate_macho "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" arm64 x86_64
 
 case "$BUILD_FLAVOR" in
   unsigned)

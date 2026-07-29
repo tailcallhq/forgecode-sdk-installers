@@ -28,9 +28,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: macos/.build
-          key: swift-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/Tests/**') }}
+          key: swift-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/Tests/**', 'macos/tools/fetch-sparkle.sh') }}
           restore-keys: |
             swift-${{ runner.os }}-
+
+      - name: Vendor Sparkle (pinned checksum)
+        working-directory: macos
+        run: tools/fetch-sparkle.sh
 
       - name: Run tests
         working-directory: macos

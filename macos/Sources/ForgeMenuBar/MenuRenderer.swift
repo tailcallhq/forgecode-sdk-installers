@@ -32,6 +32,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onOpenFrontend: (() -> Void)?
     var onOpenConversation: ((String) -> Void)?
     var onShowError: ((String) -> Void)?
+    var onCheckForUpdates: (() -> Void)?
     var onQuit: (() -> Void)?
 
     private let popover = NSPopover()
@@ -330,6 +331,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             title: "Open Logs",
             symbol: "doc.text",
             action: #selector(openLogsCommand)
+        ))
+        bodyStack.addArrangedSubview(commandRow(
+            title: "Check for Updates…",
+            symbol: "arrow.down.circle",
+            action: #selector(checkForUpdatesCommand)
         ))
         if presentation.actionableError != nil {
             bodyStack.addArrangedSubview(commandRow(
@@ -658,6 +664,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
     @objc private func openLogsCommand() { close(); onOpenLogs?() }
+    @objc private func checkForUpdatesCommand() { close(); onCheckForUpdates?() }
     @objc private func openFrontendCommand() { close(); onOpenFrontend?() }
     @objc private func showErrorCommand() {
         guard let message = presentation.actionableError else { return }

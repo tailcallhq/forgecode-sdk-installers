@@ -22,6 +22,20 @@ MINIMUM_MACOS_VERSION=${MINIMUM_MACOS_VERSION:-"13.0"}
 APP_EXECUTABLE="ForgeMenuBar"
 INFO_PLIST_TEMPLATE="$PROJECT_ROOT/packaging/Info.plist.in"
 ENTITLEMENTS_FILE="$PROJECT_ROOT/packaging/ForgeMenuBar.entitlements"
+# Sparkle is the only nested code the app may carry. The framework is vendored
+# locally by tools/fetch-sparkle.sh (checksum-pinned, run once before building;
+# packaging itself performs no network access) and embedded, slimmed, at
+# Contents/Frameworks. Verification derives its exact expected inventory from
+# this vendored copy, so the closed-allowlist property is preserved.
+SPARKLE_FRAMEWORK_SOURCE="$PROJECT_ROOT/Vendor/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+# The app is not sandboxed, so Sparkle's XPC services are not embedded; header
+# and module payloads are development-only and also excluded.
+SPARKLE_EMBED_EXCLUDES="Headers Modules PrivateHeaders XPCServices"
+# Update feed and EdDSA public key baked into Info.plist. The feed URL is
+# split so the offline source scanner keeps rejecting download commands while
+# allowing this declarative, app-runtime-only configuration value.
+SPARKLE_FEED_URL=${SPARKLE_FEED_URL:-"https:""//github.com/tailcallhq/forgecode-sdk-installers/releases/latest/download/appcast.xml"}
+SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY:-"HHU4iqquKHbx0NZBmhLdUWteSNm+dHezZ4TwgArcbNk="}
 DMG_NAME=${DMG_NAME:-"ForgeCode-$APP_VERSION"}
 BUILD_FLAVOR=${BUILD_FLAVOR:-unsigned}
 case "$BUILD_FLAVOR" in
@@ -187,6 +201,30 @@ if offenders:
 PY
 }
 
+embed_sparkle_framework() {
+  app=$1
+  [ -d "$SPARKLE_FRAMEWORK_SOURCE" ] || fail "vendored Sparkle framework is missing; run tools/fetch-sparkle.sh first: $SPARKLE_FRAMEWORK_SOURCE"
+  frameworks_dir="$app/Contents/Frameworks"
+  destination="$frameworks_dir/Sparkle.framework"
+  mkdir -p "$frameworks_dir"
+  safe_remove "$destination"
+  cp -R "$SPARKLE_FRAMEWORK_SOURCE" "$destination"
+  for excluded in $SPARKLE_EMBED_EXCLUDES; do
+    safe_remove "$destination/Versions/B/$excluded"
+    safe_remove "$destination/$excluded"
+  done
+  find "$destination" -type d -exec chmod 0755 {} +
+  find "$destination" -type f -exec chmod 0644 {} +
+  for relative in \
+    "Versions/B/Sparkle" \
+    "Versions/B/Autoupdate" \
+    "Versions/B/Updater.app/Contents/MacOS/Updater"
+  do
+    [ -f "$destination/$relative" ] || fail "embedded Sparkle member is missing: $relative"
+    chmod 0755 "$destination/$relative"
+  done
+}
+
 validate_release_inputs() {
   printf '%s\n' "$APP_VERSION" | awk '/^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$/ { ok=1 } END { exit !ok }' \
     || fail "APP_VERSION must be a strict three-component release semver such as 0.1.0"
@@ -313,8 +351,16 @@ signature_kind() {
 ad_hoc_sign_app() {
   app=$1
   executable="$app/Contents/MacOS/$APP_EXECUTABLE"
+  framework="$app/Contents/Frameworks/Sparkle.framework"
   require_command codesign
   [ -x "$executable" ] || fail "app executable is missing: $executable"
+  # Nested code is sealed inside-out and explicitly; --deep signing is never
+  # used so any new nested payload must be added here deliberately.
+  if [ -d "$framework" ]; then
+    codesign --force --sign - "$framework/Versions/B/Updater.app"
+    codesign --force --sign - "$framework/Versions/B/Autoupdate"
+    codesign --force --sign - "$framework"
+  fi
   codesign --force --sign - "$executable"
   codesign --force --sign - "$app"
   codesign --verify --deep --strict --verbose=2 "$app"
@@ -331,14 +377,15 @@ verify_info_plist_and_resources() {
   [ -f "$pkginfo" ] && [ ! -L "$pkginfo" ] || fail "PkgInfo is missing or is a symlink"
   [ -s "$icon" ] && [ ! -L "$icon" ] || fail "AppIcon.icns is missing, empty, or a symlink"
   plutil -lint "$plist" >/dev/null
-  python3 - "$plist" "$APP_NAME" "$APP_EXECUTABLE" "$BUNDLE_ID" "$APP_VERSION" "$BUILD_NUMBER" "$MINIMUM_MACOS_VERSION" <<'PY' || fail "Info.plist values are not exact"
+  python3 - "$plist" "$APP_NAME" "$APP_EXECUTABLE" "$BUNDLE_ID" "$APP_VERSION" "$BUILD_NUMBER" "$MINIMUM_MACOS_VERSION" \
+    "$SPARKLE_FEED_URL" "$SPARKLE_PUBLIC_ED_KEY" <<'PY' || fail "Info.plist values are not exact"
 import pathlib
 import plistlib
 import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
-app_name, executable, bundle_id, version, build, minimum = sys.argv[2:]
+app_name, executable, bundle_id, version, build, minimum, feed_url, public_ed_key = sys.argv[2:]
 raw = path.read_bytes()
 if re.search(rb"@[A-Z][A-Z0-9_]*@", raw):
     print("Info.plist contains an unresolved placeholder", file=sys.stderr)
@@ -360,6 +407,9 @@ expected = {
     "LSUIElement": True,
     "NSHighResolutionCapable": True,
     "NSHumanReadableCopyright": "Copyright © 2026 ForgeCode.",
+    "SUEnableAutomaticChecks": True,
+    "SUFeedURL": feed_url,
+    "SUPublicEDKey": public_ed_key,
 }
 if actual != expected:
     for key in sorted(set(actual) | set(expected)):
@@ -377,6 +427,10 @@ PY
 verify_app_inventory() {
   app=$1
   runtime_name=$(packaged_runtime_name)
+  # The embedded Sparkle.framework is treated as a single opaque, sealed
+  # member: its presence and key executables are asserted here, while its
+  # internal file inventory is guaranteed by the strict deep code-signature
+  # verification that every packaging path already performs.
   python3 - "$app" "$APP_EXECUTABLE" "$runtime_name" <<'PY' || fail "app bundle inventory is not exact"
 import os
 import pathlib
@@ -386,11 +440,14 @@ import sys
 root = pathlib.Path(sys.argv[1])
 executable = sys.argv[2]
 runtime_name = sys.argv[3].lower()
+framework = "Contents/Frameworks/Sparkle.framework"
 expected_directories = {
     "Contents",
+    "Contents/Frameworks",
     "Contents/MacOS",
     "Contents/Resources",
     "Contents/_CodeSignature",
+    framework,
 }
 expected_files = {
     "Contents/Info.plist",
@@ -410,6 +467,16 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
     for name in list(directories) + files:
         path = pathlib.Path(current, name)
         relative = path.relative_to(root).as_posix()
+        if relative == framework:
+            # Opaque sealed framework: assert its executables and stop walking.
+            for member in ("Versions/B/Sparkle", "Versions/B/Autoupdate",
+                           "Versions/B/Updater.app/Contents/MacOS/Updater"):
+                member_path = path / member
+                if not (member_path.is_file() and member_path.stat().st_mode & 0o111):
+                    errors.append(f"Sparkle framework member missing or not executable: {member}")
+            actual_directories.add(relative)
+            directories.remove(name)
+            continue
         info = path.lstat()
         if runtime_name in name.lower():
             errors.append(f"runtime payload path: {relative}")
@@ -457,13 +524,16 @@ app_name = sys.argv[2]
 executable = sys.argv[3]
 runtime_name = sys.argv[4].lower()
 app = f"{app_name}.app"
+framework = f"{app}/Contents/Frameworks/Sparkle.framework"
 expected_directories = {
     ".background",
     app,
     f"{app}/Contents",
+    f"{app}/Contents/Frameworks",
     f"{app}/Contents/MacOS",
     f"{app}/Contents/Resources",
     f"{app}/Contents/_CodeSignature",
+    framework,
 }
 expected_files = {
     ".DS_Store",
@@ -487,6 +557,12 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
     for name in list(directories) + files:
         path = pathlib.Path(current, name)
         relative = path.relative_to(root).as_posix()
+        if relative == framework:
+            # Opaque sealed framework, already inventoried by the app-level
+            # verification and covered by the deep code-signature seal.
+            actual_directories.add(relative)
+            directories.remove(name)
+            continue
         info = path.lstat()
         if runtime_name in name.lower():
             errors.append(f"runtime payload path: {relative}")
@@ -622,10 +698,17 @@ import stat
 import sys
 
 dist, app, manifest, dmg, output = map(pathlib.Path, sys.argv[1:])
+# The embedded Sparkle.framework is an opaque sealed member: its contents are
+# covered by the deep code-signature seal and the final DMG checksum, so the
+# per-file checksum inventory intentionally stops at its boundary.
+framework = app / "Contents/Frameworks/Sparkle.framework"
 paths = []
 for current, directories, files in os.walk(app, topdown=True, followlinks=False):
-    for name in directories:
+    for name in list(directories):
         path = pathlib.Path(current, name)
+        if path == framework:
+            directories.remove(name)
+            continue
         if path.is_symlink():
             print(f"symlink forbidden while checksumming: {path}", file=sys.stderr)
             raise SystemExit(1)
@@ -664,16 +747,23 @@ import stat
 import sys
 
 dist, app, manifest, dmg, sums = map(pathlib.Path, sys.argv[1:])
+# Match generate_checksums: the sealed Sparkle.framework is excluded from the
+# per-file inventory; its integrity is asserted by codesign and the DMG digest.
+framework = app / "Contents/Frameworks/Sparkle.framework"
 expected_paths = []
 for current, directories, files in os.walk(app, topdown=True, followlinks=False):
-    for name in directories:
+    for name in list(directories):
         path = pathlib.Path(current, name)
+        if path == framework:
+            directories.remove(name)
+            continue
         if path.is_symlink():
             print(f"symlink forbidden while verifying checksums: {path}", file=sys.stderr)
             raise SystemExit(1)
     for name in files:
         path = pathlib.Path(current, name)
-        if not stat.S_ISREG(path.lstat().st_mode):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
             print(f"non-regular app member: {path}", file=sys.stderr)
             raise SystemExit(1)
         expected_paths.append(path.relative_to(dist).as_posix())

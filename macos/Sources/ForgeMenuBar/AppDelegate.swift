@@ -2,6 +2,7 @@ import AppKit
 import ForgeMenuCore
 import Foundation
 import ServiceManagement
+import Sparkle
 
 @main
 @MainActor
@@ -15,6 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let preferences = AppPreferences()
     private let logger = AppLogger.shared
+    // Sparkle drives application self-updates from the appcast feed declared
+    // in Info.plist (SUFeedURL) and verifies each download against the
+    // embedded EdDSA public key (SUPublicEDKey) plus Developer ID signing.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private var statusItem: NSStatusItem!
     private var popoverController: PopoverController!
     private var serviceController: ServiceController!
@@ -118,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             self?.presentActionError(title: "ForgeCode needs attention", error: error)
         }
+        popoverController.onCheckForUpdates = { [weak self] in self?.checkForUpdates() }
         popoverController.onQuit = { NSApp.terminate(nil) }
     }
 
@@ -158,6 +168,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu(title: "Main Menu")
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
+        let checkForUpdates = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdates.target = updaterController
+        appMenu.addItem(checkForUpdates)
+        appMenu.addItem(.separator())
         let quit = NSMenuItem(
             title: "Quit ForgeCode",
             action: #selector(NSApplication.terminate(_:)),
@@ -169,6 +187,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    private func checkForUpdates() {
+        // The update alert is an ordinary window; an accessory app must
+        // activate so the panel actually comes to the front.
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(nil)
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {

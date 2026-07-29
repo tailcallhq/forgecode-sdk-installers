@@ -75,14 +75,15 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           if [ -n "$MACOS_CERT_P12" ] && [ -n "$MACOS_CERT_PASSWORD" ] \
             && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ] \
-            && [ -n "$NOTARY_KEY" ]; then
+            && [ -n "$NOTARY_KEY" ] && [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Signing secrets are not configured; skipping signed release build."
+            echo "::notice::Signing or Sparkle update secrets are not configured; skipping signed release build."
           fi
 
       - name: Checkout Code
@@ -94,9 +95,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: macos/.build
-          key: swift-release-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/Tests/**') }}
+          key: swift-release-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/Tests/**', 'macos/tools/fetch-sparkle.sh') }}
           restore-keys: |
             swift-release-${{ runner.os }}-
+
+      - name: Vendor Sparkle (pinned checksum)
+        if: steps.check.outputs.ready == 'true'
+        working-directory: macos
+        run: tools/fetch-sparkle.sh
 
       - name: Derive APP_VERSION from drafted tag
         if: steps.check.outputs.ready == 'true'
@@ -108,6 +114,9 @@ jobs:
           printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
             || { echo "error: drafted tag '$TAG_NAME' is not a strict semver tag" >&2; exit 1; }
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          # Sparkle compares CFBundleVersion, so the build number must increase
+          # with every published release; the release semver satisfies that.
+          echo "BUILD_NUMBER=$version" >> "$GITHUB_ENV"
 
       - name: Import signing certificate
         if: steps.check.outputs.ready == 'true'
@@ -157,6 +166,41 @@ jobs:
           SIGNING_TEAM_ID: ${{ secrets.SIGNING_TEAM_ID }}
         run: scripts/release.sh
 
+      - name: Generate signed appcast
+        if: steps.check.outputs.ready == 'true'
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAG_NAME: ${{ needs.draft_release.outputs.tag_name }}
+        run: |
+          set -eu
+          dmg="macos/dist/signed/ForgeCode-$APP_VERSION.dmg"
+          signature=$(echo "$SPARKLE_ED_PRIVATE_KEY" \
+            | ./macos/Vendor/Sparkle/bin/sign_update --ed-key-file - -p "$dmg")
+          length=$(stat -f %z "$dmg")
+          download_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/ForgeCode-$APP_VERSION.dmg"
+          minimum_macos=$(sed -n 's/^minimum_macos=//p' macos/dist/signed/manifest.txt)
+          published=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
+          cat > macos/dist/signed/appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>ForgeCode</title>
+              <item>
+                <title>ForgeCode $APP_VERSION</title>
+                <link>https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG_NAME</link>
+                <sparkle:version>$BUILD_NUMBER</sparkle:version>
+                <sparkle:shortVersionString>$APP_VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>$minimum_macos</sparkle:minimumSystemVersion>
+                <pubDate>$published</pubDate>
+                <enclosure url="$download_url" type="application/octet-stream" length="$length" sparkle:edSignature="$signature" />
+              </item>
+            </channel>
+          </rss>
+          XML
+          # Strip the heredoc indentation so the XML declaration is at column 0.
+          sed -i '' 's/^          //' macos/dist/signed/appcast.xml
+          xmllint --noout macos/dist/signed/appcast.xml
+
       - name: Stage release artifacts
         if: steps.check.outputs.ready == 'true'
         run: |
@@ -166,6 +210,7 @@ jobs:
           cp "macos/dist/signed/ForgeCode-$APP_VERSION.dmg" release-artifacts/
           cp macos/dist/signed/manifest.txt release-artifacts/
           cp macos/dist/signed/SHA256SUMS release-artifacts/
+          cp macos/dist/signed/appcast.xml release-artifacts/
 
       - name: Upload staged artifacts
         if: steps.check.outputs.ready == 'true'
@@ -209,6 +254,7 @@ jobs:
             "ForgeCode-$version.dmg"
             "manifest.txt"
             "SHA256SUMS"
+            "appcast.xml"
           )
           for file in "${expected[@]}"; do
             test -f "$file" || { echo "missing expected artifact: $file" >&2; exit 1; }

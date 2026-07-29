@@ -19,13 +19,20 @@ let package = Package(
             dependencies: [],
             path: "Sources/ForgeMenuCore"
         ),
+        .binaryTarget(
+            name: "Sparkle",
+            path: "Vendor/Sparkle/Sparkle.xcframework"
+        ),
         .executableTarget(
             name: "ForgeMenuBar",
-            dependencies: ["ForgeMenuCore"],
+            dependencies: ["ForgeMenuCore", "Sparkle"],
             path: "Sources/ForgeMenuBar",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                // Sparkle.framework is embedded at Contents/Frameworks by
+                // scripts/assemble-app.sh; the executable must search there.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
         ),
         .executableTarget(
