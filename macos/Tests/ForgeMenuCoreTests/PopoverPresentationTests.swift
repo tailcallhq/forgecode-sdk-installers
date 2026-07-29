@@ -177,7 +177,6 @@ final class PopoverPresentationTests: XCTestCase {
             XCTAssertEqual(presentation.serviceDetail, detail)
             XCTAssertEqual(presentation.serviceTone, .active)
             XCTAssertFalse(presentation.refreshEnabled)
-            XCTAssertTrue(presentation.restartEnabled)
             XCTAssertFalse(presentation.canOpenFrontend)
             XCTAssertEqual(presentation.conversationsSummary, "Installing…")
         }
@@ -220,7 +219,6 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.bodyMessage, "Runtime installation failed")
         XCTAssertEqual(presentation.actionableError, message)
         XCTAssertTrue(presentation.retryInstallationEnabled)
-        XCTAssertFalse(presentation.restartEnabled)
         XCTAssertFalse(presentation.refreshEnabled)
         XCTAssertNil(presentation.installationProgress)
     }
@@ -237,7 +235,6 @@ final class PopoverPresentationTests: XCTestCase {
             "Runtime folder access was denied. Check permissions and retry."
         )
         XCTAssertTrue(presentation.retryInstallationEnabled)
-        XCTAssertFalse(presentation.restartEnabled)
         XCTAssertFalse(presentation.refreshEnabled)
     }
 
@@ -248,9 +245,8 @@ final class PopoverPresentationTests: XCTestCase {
                 activeConversations: [ActiveConversation(id: "late", title: "Late")]
             ))
             XCTAssertTrue(presentation.conversations.isEmpty)
-            XCTAssertEqual(presentation.bodyMessage, "Start ForgeCode to view active conversations")
+            XCTAssertEqual(presentation.bodyMessage, "The ForgeCode service is not running")
             XCTAssertFalse(presentation.refreshEnabled)
-            XCTAssertFalse(presentation.restartEnabled)
             XCTAssertNil(presentation.endpointAddress)
             XCTAssertNil(presentation.endpointPortLabel)
             XCTAssertFalse(presentation.canOpenFrontend)

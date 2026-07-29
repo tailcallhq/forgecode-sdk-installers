@@ -35,7 +35,6 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let canExpandConversations: Bool
     public let bodyMessage: String?
     public let refreshEnabled: Bool
-    public let restartEnabled: Bool
     public enum InstallationProgress: Equatable, Sendable {
         case indeterminate(label: String)
         case determinate(value: Double, label: String)
@@ -67,7 +66,7 @@ public struct PopoverPresentation: Equatable, Sendable {
             case .failed:
                 bodyMessage = "Conversations unavailable"
             case .disabled, .stopped:
-                bodyMessage = "Start ForgeCode to view active conversations"
+                bodyMessage = "The ForgeCode service is not running"
             }
         } else {
             bodyMessage = nil
@@ -94,7 +93,6 @@ public struct PopoverPresentation: Equatable, Sendable {
             canExpandConversations: !isInactive(snapshot.phase),
             bodyMessage: bodyMessage,
             refreshEnabled: refreshEnabled(snapshot),
-            restartEnabled: restartEnabled(snapshot.phase),
             retryInstallationEnabled: isInstallationFailure(snapshot.phase),
             installationProgress: installationProgress(snapshot.phase),
             actionableError: phaseError ?? snapshot.streamError
@@ -187,13 +185,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         switch snapshot.phase {
         case .starting, .ready, .restarting: return snapshot.endpoint != nil
         case .disabled, .installing, .installationFailed, .failed, .stopped: return false
-        }
-    }
-
-    private static func restartEnabled(_ phase: ServicePhase) -> Bool {
-        switch phase {
-        case .installing, .starting, .ready, .restarting, .failed: return true
-        case .disabled, .installationFailed, .stopped: return false
         }
     }
 

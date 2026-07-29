@@ -11,9 +11,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         case unavailable(String)
     }
 
-    // Sized so the default command list fits without scrolling; the expanded
-    // conversation list scrolls within the same fixed frame.
-    static let contentSize = NSSize(width: 288, height: 336)
+    // Sized so the default command list fits without scrolling, with the
+    // remaining height given to the expanded conversation list, which scrolls
+    // within the same fixed frame.
+    static let contentSize = NSSize(width: 288, height: 280)
     private static let bodyContentWidth: CGFloat = 280
     /// Horizontal inset shared by rows, separators and notes.
     private static let rowInset: CGFloat = 10
@@ -23,20 +24,16 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         + CommandRowView.iconToLabelGap
 
     var onWillShow: (() -> Void)?
-    var onRunServiceChanged: ((Bool) -> Void)?
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
     var onOpenLoginItems: (() -> Void)?
     var onRefresh: (() -> Void)?
-    var onRestart: (() -> Void)?
     var onRetryInstallation: (() -> Void)?
     var onOpenLogs: (() -> Void)?
-    var onConfigureConsoleOrigin: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
     var onOpenConversation: ((String) -> Void)?
     var onShowError: ((String) -> Void)?
     var onQuit: (() -> Void)?
 
-    private let preferences: AppPreferences
     private let popover = NSPopover()
     private let contentController = PopoverContentViewController()
     private let statusTitle = NSTextField(labelWithString: "")
@@ -60,8 +57,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private var globalMouseMonitor: Any?
     private var localKeyMonitor: Any?
 
-    init(preferences: AppPreferences) {
-        self.preferences = preferences
+    override init() {
         super.init()
         configurePopover()
         rebuild()
@@ -277,7 +273,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         openFrontendButton.isEnabled = presentation.canOpenFrontend
         openFrontendButton.toolTip = presentation.canOpenFrontend
             ? frontendTooltip
-            : "Start ForgeCode before opening the frontend"
+            : "The frontend can be opened once the ForgeCode service is running"
         refreshButton.isEnabled = presentation.refreshEnabled
         rebuildConversationBody()
     }
@@ -314,13 +310,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         bodyStack.addArrangedSubview(bodySeparator())
 
         bodyStack.addArrangedSubview(commandRow(
-            title: "Run ForgeCode Service",
-            symbol: preferences.runService ? "checkmark.circle.fill" : "circle",
-            action: #selector(toggleRunServiceCommand),
-            isOn: preferences.runService,
-            isToggle: true
-        ))
-        bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
             symbol: loginItemState == .enabled ? "checkmark.circle.fill" : "circle",
             action: #selector(toggleLaunchAtLoginCommand),
@@ -338,20 +327,9 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
         bodyStack.addArrangedSubview(commandRow(
-            title: "Restart ForgeCode Service",
-            symbol: "arrow.triangle.2.circlepath",
-            action: #selector(restartCommand),
-            isEnabled: presentation.restartEnabled
-        ))
-        bodyStack.addArrangedSubview(commandRow(
             title: "Open Logs",
             symbol: "doc.text",
             action: #selector(openLogsCommand)
-        ))
-        bodyStack.addArrangedSubview(commandRow(
-            title: "Console Origin…",
-            symbol: "network",
-            action: #selector(configureConsoleOriginCommand)
         ))
         if presentation.actionableError != nil {
             bodyStack.addArrangedSubview(commandRow(
@@ -671,18 +649,15 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     // Toggles keep the popover open so the resulting state change is visible.
-    @objc private func toggleRunServiceCommand() { onRunServiceChanged?(!preferences.runService) }
     @objc private func toggleLaunchAtLoginCommand() {
         guard launchAtLoginAvailable else { return }
         onLaunchAtLoginChanged?(loginItemState != .enabled)
     }
-    @objc private func restartCommand() { onRestart?() }
     @objc private func retryInstallationCommand() { onRetryInstallation?() }
 
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
     @objc private func openLogsCommand() { close(); onOpenLogs?() }
-    @objc private func configureConsoleOriginCommand() { close(); onConfigureConsoleOrigin?() }
     @objc private func openFrontendCommand() { close(); onOpenFrontend?() }
     @objc private func showErrorCommand() {
         guard let message = presentation.actionableError else { return }
