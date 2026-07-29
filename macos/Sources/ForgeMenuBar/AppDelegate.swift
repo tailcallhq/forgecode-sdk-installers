@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 clientFactory: { endpoint in WebSocketRPCClient(endpoint: endpoint.webSocketURL) },
                 logger: logger
             )
-            serviceController = ServiceController(preferences: preferences, supervisor: supervisor)
+            serviceController = ServiceController(supervisor: supervisor)
 
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
             statusItem.button?.image = ForgeCodeLogo.statusImage()
@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.action = #selector(togglePopover(_:))
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-            popoverController = PopoverController(preferences: preferences)
+            popoverController = PopoverController()
             wireActions(paths: paths)
             serviceController.onSnapshotChanged = { [weak self] snapshot in
                 guard let self else { return }
@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             synchronizeLoginPreference()
             popoverController.update(snapshot: serviceController.snapshot, loginItemState: loginItemState)
-            serviceController.startAccordingToPreference()
+            serviceController.start()
         } catch {
             logger.error(error.localizedDescription)
             presentFatalError(error.localizedDescription)
@@ -92,15 +92,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func wireActions(paths: RuntimePaths) {
         popoverController.onWillShow = { [weak self] in self?.synchronizeLoginPreference() }
-        popoverController.onRunServiceChanged = { [weak self] enabled in
-            self?.serviceController.setRunService(enabled)
-        }
         popoverController.onLaunchAtLoginChanged = { [weak self] enabled in
             self?.setLaunchAtLogin(enabled)
         }
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
         popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
-        popoverController.onRestart = { [weak self] in self?.serviceController.restart() }
         popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
         popoverController.onOpenLogs = { [weak self] in
             do {
@@ -109,9 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 self?.presentActionError(title: "Logs could not be opened", error: error)
             }
-        }
-        popoverController.onConfigureConsoleOrigin = { [weak self] in
-            self?.configureConsoleOrigin()
         }
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()
@@ -128,37 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onQuit = { NSApp.terminate(nil) }
     }
 
-    private func configureConsoleOrigin() {
-        let current = (try? ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin).absoluteString)
-            ?? ConsoleURLBuilder.defaultOrigin
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "ForgeCode Console Origin"
-        alert.informativeText = "Enter an HTTP or HTTPS origin. The FORGE_CONSOLE_ORIGIN environment variable takes precedence when set."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Use Default")
-        let field = NSTextField(string: current)
-        field.placeholderString = ConsoleURLBuilder.defaultOrigin
-        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
-        alert.accessoryView = field
-        let response = alert.runModal()
-        if response == .alertThirdButtonReturn {
-            preferences.consoleOrigin = nil
-            return
-        }
-        guard response == .alertFirstButtonReturn else { return }
-        do {
-            _ = try ConsoleURLBuilder.validateOrigin(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
-            preferences.consoleOrigin = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            presentActionError(title: "Console origin is invalid", error: error)
-        }
-    }
-
     private func openFrontend() {
         do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let origin = try ConsoleURLBuilder.resolvedOrigin()
             let url = try ConsoleURLBuilder.consoleURL(
                 origin: origin,
                 endpoint: serviceController.snapshot.endpoint
@@ -174,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openConversation(_ conversationID: String) {
         do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let origin = try ConsoleURLBuilder.resolvedOrigin()
             let url = try ConsoleURLBuilder.conversationURL(
                 conversationID: conversationID,
                 origin: origin,

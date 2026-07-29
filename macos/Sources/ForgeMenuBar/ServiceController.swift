@@ -9,18 +9,17 @@ final class ServiceController {
         didSet { onSnapshotChanged?(snapshot) }
     }
 
-    private let preferences: AppPreferences
     private let supervisor: ServiceSupervisor
     private var desiredStateRevision: UInt64 = 0
     private var snapshotRevisionGate = ServiceSnapshotRevisionGate()
 
-    init(preferences: AppPreferences, supervisor: ServiceSupervisor) {
-        self.preferences = preferences
+    init(supervisor: ServiceSupervisor) {
         self.supervisor = supervisor
     }
 
-    func startAccordingToPreference() {
-        let enabled = preferences.runService
+    /// The service runs for the lifetime of the app: it starts here at launch
+    /// and is stopped by `stopForTermination()` when the app quits.
+    func start() {
         desiredStateRevision &+= 1
         let revision = desiredStateRevision
         Task { [weak self] in
@@ -28,23 +27,12 @@ final class ServiceController {
             await supervisor.installCallbacks { [weak self] snapshot in
                 Task { @MainActor in self?.apply(snapshot) }
             }
-            await supervisor.setDesiredEnabled(enabled, revision: revision)
+            await supervisor.setDesiredEnabled(true, revision: revision)
         }
-    }
-
-    func setRunService(_ enabled: Bool) {
-        preferences.runService = enabled
-        desiredStateRevision &+= 1
-        let revision = desiredStateRevision
-        Task { await supervisor.setDesiredEnabled(enabled, revision: revision) }
     }
 
     func refreshNow() {
         Task { await supervisor.refreshNow() }
-    }
-
-    func restart() {
-        Task { await supervisor.restart() }
     }
 
     func retryInstallation() {

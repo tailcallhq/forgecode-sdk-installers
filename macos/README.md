@@ -52,9 +52,11 @@ The popover contains:
 - a scrollable body;
 - a fixed footer with the port, **Open**, and **Refresh**.
 
-The body shows the commands directly: a **Conversations** disclosure row followed by Run ForgeCode Service, Launch at Login and its approval path, Restart ForgeCode Service, Open Logs, Console Origin…, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button.
+The body shows the commands directly: a **Conversations** disclosure row followed by Launch at Login and its approval path, Open Logs, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button.
 
-Selecting **Conversations** expands the list in place; the row summarises the current state (`3 running`, `None running`, `Connecting…`) and is inert while the service is off. A back row returns to the commands, and closing the popover always resets to the commands view.
+The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
+
+Selecting **Conversations** expands the list in place; the row summarises the current state (`3 running`, `None running`, `Connecting…`) and is inert while the service is not running. A back row returns to the commands, and closing the popover always resets to the commands view.
 
 Only root conversations whose SDK status is exactly `running` appear. Titles come from the string `variables.title`, are trimmed, and fall back to **Untitled**. Selecting a row opens that conversation in the default browser.
 
@@ -66,13 +68,13 @@ Conversation links use this default origin:
 https://console.forgecode.dev
 ```
 
-Configure a persistent HTTP or HTTPS origin with **Console Origin…**. For local frontend development, use for example:
+Set the `FORGE_CONSOLE_ORIGIN` environment variable to override it. For local frontend development, use for example:
 
 ```text
-http://127.0.0.1:5173
+FORGE_CONSOLE_ORIGIN=http://127.0.0.1:5173
 ```
 
-The `FORGE_CONSOLE_ORIGIN` environment variable overrides the preference when present. Origins must contain only an `http` or `https` scheme, host, optional port, and root path; credentials, non-root paths, queries, and fragments are rejected. Conversation links are built as `/c/<percent-encoded-conversation-id>`, so conversation IDs cannot inject paths, queries, or fragments.
+There is no persisted origin preference and no in-app editor; the environment variable is the only override. Origins must contain only an `http` or `https` scheme, host, optional port, and root path; credentials, non-root paths, queries, and fragments are rejected. Conversation links are built as `/c/<percent-encoded-conversation-id>`, so conversation IDs cannot inject paths, queries, or fragments.
 
 Both **Open** and conversation links append the running backend endpoint so the frontend connects to this service automatically:
 
@@ -85,13 +87,13 @@ The query value always reflects the port the helper actually bound, so a fallbac
 
 ## Service and active-conversation architecture
 
-When **Run ForgeCode Service** first requires the service, ForgeCode installs the runtime under `~/Library/Application Support/ForgeCode/runtime` if it is not already present. Before a newly downloaded runtime is activated, the installer validates the immutable HTTPS release version used for tag and artifact URL selection, checksum sidecar, archive structure, Mach-O architecture, embedded signature structure, signature class, pinned executable identity, and quarantine policy. Installed runtime directories, executables, and receipts use modes `0700`, `0700`, and `0600`. On later lookup or launch, the receipt is metadata and a candidate locator only: stale version/hash fields are allowed, and neither receipt hashes nor executable checksum, Mach-O, signature, inode, size, or original version are revalidated. The managed executable is accepted only through a safe no-symlink path with a private current-owner directory and a current-owner, regular, single-link, non-group/world-writable, owner-executable file. Parent-directory-pinned relative spawning preserves path-race protection while allowing legitimate self-replacement between launches. It then launches the installed runtime as:
+When the app launches and first requires the service, ForgeCode installs the runtime under `~/Library/Application Support/ForgeCode/runtime` if it is not already present. Before a newly downloaded runtime is activated, the installer validates the immutable HTTPS release version used for tag and artifact URL selection, checksum sidecar, archive structure, Mach-O architecture, embedded signature structure, signature class, pinned executable identity, and quarantine policy. Installed runtime directories, executables, and receipts use modes `0700`, `0700`, and `0600`. On later lookup or launch, the receipt is metadata and a candidate locator only: stale version/hash fields are allowed, and neither receipt hashes nor executable checksum, Mach-O, signature, inode, size, or original version are revalidated. The managed executable is accepted only through a safe no-symlink path with a private current-owner directory and a current-owner, regular, single-link, non-group/world-writable, owner-executable file. Parent-directory-pinned relative spawning preserves path-race protection while allowing legitimate self-replacement between launches. It then launches the installed runtime as:
 
 ```text
 forge3 --log-format json ws --addr 127.0.0.1:<first-free-port-from-9753>
 ```
 
-The ForgeCode installer does not poll for newer runtimes at app startup or in the background. The persisted **Run ForgeCode Service** preference is the desired state. Unexpected exits and readiness failures use bounded exponential restart backoff. Stop and app termination use bounded `TERM`, `KILL`, and child reaping, with best-effort process-group cleanup. The runtime environment is allowlisted instead of copied wholesale, and JSON-aware/text fallback redaction is applied before bounded rotating logs are stored in `~/Library/Logs/ForgeMenuBar/`.
+The ForgeCode installer does not poll for newer runtimes at app startup or in the background. The app's own lifetime is the desired state: the service is started at launch and stopped on termination. Unexpected exits and readiness failures use bounded exponential restart backoff. Stop and app termination use bounded `TERM`, `KILL`, and child reaping, with best-effort process-group cleanup. The runtime environment is allowlisted instead of copied wholesale, and JSON-aware/text fallback redaction is applied before bounded rotating logs are stored in `~/Library/Logs/ForgeMenuBar/`.
 
 The active app does not poll usage, extensions, models, or providers. It opens an SDK stream using a string request ID and the exact request:
 
@@ -116,7 +118,7 @@ The active app does not poll usage, extensions, models, or providers. It opens a
 params.stream.result.extension.conversation_list.conversations
 ```
 
-Every snapshot is authoritative and replaces the previous active list. Stream errors, completion, malformed sequence, socket failure, and disconnect are interruptions: active rows are cleared and the app reconnects with bounded backoff while the service remains desired and running. Each subscription receives a new request ID. **Refresh** cancels the current subscription, clears its rows, and immediately creates a fresh subscription. Process and subscription generations prevent late frames from superseded work from updating current state. Deliberate stop or disable clears all conversation and stream-derived state.
+Every snapshot is authoritative and replaces the previous active list. Stream errors, completion, malformed sequence, socket failure, and disconnect are interruptions: active rows are cleared and the app reconnects with bounded backoff while the service remains desired and running. Each subscription receives a new request ID. **Refresh** cancels the current subscription, clears its rows, and immediately creates a fresh subscription. Process and subscription generations prevent late frames from superseded work from updating current state. Stopping the service clears all conversation and stream-derived state.
 
 A one-shot implementation using outer method `extension`, the same externally tagged `conversation_list` roots params, and the exact complete response path is retained as a tested fallback contract, but the active application uses streaming. The obsolete outer methods `conversation_list` and `conversation_list/xstream` are intentionally not accepted.
 
