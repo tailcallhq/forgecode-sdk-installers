@@ -101,6 +101,14 @@ private actor ControlledRuntimeInstaller: RuntimeInstalling {
     private var cancelledBeforePending: Set<Int> = []
     private var observedCancellations: Set<Int> = []
     private var requestWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    /// Number of calls that have reached a state where `complete(_:callID:)`
+    /// can actually deliver a result. `installLatest` awaits the `.resolving`
+    /// progress callback before registering its continuation, so a waiter that
+    /// resumed merely on call entry could complete a call whose continuation
+    /// did not exist yet -- `complete` would silently drop the result and the
+    /// install would hang until the test's timeout. Waiters therefore key off
+    /// this counter instead of the call counter.
+    private var settledCalls = 0
 
     init(current: InstalledRuntime? = nil, ignoresCancellation: Bool = false) {
         self.current = current
@@ -115,9 +123,6 @@ private actor ControlledRuntimeInstaller: RuntimeInstalling {
         nextCallID += 1
         let callID = nextCallID
         callbacks[callID] = progress
-        let ready = requestWaiters.filter { $0.0 <= nextCallID }
-        requestWaiters.removeAll { $0.0 <= nextCallID }
-        ready.forEach { $0.1.resume() }
         await progress(.resolving)
 
         return try await withTaskCancellationHandler {
@@ -127,6 +132,11 @@ private actor ControlledRuntimeInstaller: RuntimeInstalling {
                 } else {
                     pending[callID] = continuation
                 }
+                // The call can now receive a result, so release any waiters.
+                settledCalls += 1
+                let ready = requestWaiters.filter { $0.0 <= settledCalls }
+                requestWaiters.removeAll { $0.0 <= settledCalls }
+                ready.forEach { $0.1.resume() }
             }
         } onCancel: {
             Task { await self.observeCancellation(callID) }
@@ -134,7 +144,7 @@ private actor ControlledRuntimeInstaller: RuntimeInstalling {
     }
 
     func waitForRequests(_ count: Int) async {
-        if nextCallID >= count { return }
+        if settledCalls >= count { return }
         await withCheckedContinuation { requestWaiters.append((count, $0)) }
     }
 
@@ -486,7 +496,17 @@ final class ServiceSupervisorTests: XCTestCase {
         for value in stride(from: 0.01, through: 0.99, by: 0.01) {
             await installer.emit(.downloading(progress: value))
         }
-        try await Task.sleep(nanoseconds: 80_000_000)
+        // The final value is coalesced behind the publish interval, so wait for
+        // it to actually surface rather than sleeping a fixed amount. Completing
+        // the install first would end the installation phase and make the
+        // supervisor correctly discard the pending publication.
+        let publishedFinalProgress = await waitUntil {
+            phases.value.contains { phase in
+                guard case .installing(.downloading(let progress)) = phase else { return false }
+                return abs(progress - 0.99) < 0.0001
+            }
+        }
+        XCTAssertTrue(publishedFinalProgress, "coalesced final progress was never published")
         await installer.complete(.success(runtime))
         await start.value
 

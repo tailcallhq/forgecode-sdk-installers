@@ -40,11 +40,13 @@ final class LiveRuntimeSmokeTests: XCTestCase {
         launch.standardOutput = FileHandle.nullDevice
         launch.standardError = launchError
         try launch.run()
-        launch.waitUntilExit()
+        // Read to EOF before reaping: a full pipe buffer would block the child
+        // while the parent blocks in waitUntilExit().
         let launchDiagnostic = String(
             decoding: launchError.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self
         )
+        launch.waitUntilExit()
         XCTAssertEqual(launch.terminationStatus, 0, launchDiagnostic)
         guard launch.terminationStatus == 0 else { return }
 
@@ -114,11 +116,13 @@ final class LiveRuntimeSmokeTests: XCTestCase {
         sign.standardOutput = FileHandle.nullDevice
         sign.standardError = signError
         try sign.run()
-        sign.waitUntilExit()
+        // Read to EOF before reaping: a full pipe buffer would block the child
+        // while the parent blocks in waitUntilExit().
         let diagnostic = String(
             decoding: signError.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self
         )
+        sign.waitUntilExit()
         guard sign.terminationStatus == 0 else {
             throw RuntimeInstallerError.processFailure("could not sign smoke helper app: \(diagnostic)")
         }
