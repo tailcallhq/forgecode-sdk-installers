@@ -3,40 +3,33 @@ import XCTest
 @testable import ForgeMenuCore
 
 final class CoreBehaviorTests: XCTestCase {
-    func testRunServiceDefaultsTrueAndPersists() throws {
+    func testLaunchAtLoginPreferencePersists() throws {
         let suite = "CoreBehaviorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = AppPreferences(defaults: defaults)
-        XCTAssertTrue(preferences.runService)
-        preferences.runService = false
-        XCTAssertFalse(AppPreferences(defaults: defaults).runService)
-    }
-
-    func testConsoleOriginPreferencePersistsAndClears() throws {
-        let suite = "ConsoleOriginTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defaults.removePersistentDomain(forName: suite)
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = AppPreferences(defaults: defaults)
-        preferences.consoleOrigin = "http://127.0.0.1:5173"
-        XCTAssertEqual(AppPreferences(defaults: defaults).consoleOrigin, "http://127.0.0.1:5173")
-        preferences.consoleOrigin = nil
-        XCTAssertNil(preferences.consoleOrigin)
+        XCTAssertFalse(preferences.launchAtLogin)
+        preferences.launchAtLogin = true
+        XCTAssertTrue(AppPreferences(defaults: defaults).launchAtLogin)
     }
 
     func testConsoleOriginResolutionPriorityAndValidation() throws {
         XCTAssertEqual(
-            try ConsoleURLBuilder.resolvedOrigin(preference: nil, environment: [:]).absoluteString,
+            try ConsoleURLBuilder.resolvedOrigin(environment: [:]).absoluteString,
             "https://console.forgecode.dev"
         )
         XCTAssertEqual(
             try ConsoleURLBuilder.resolvedOrigin(
-                preference: "https://preference.example",
                 environment: [ConsoleURLBuilder.environmentKey: "http://127.0.0.1:5173"]
             ).absoluteString,
             "http://127.0.0.1:5173"
+        )
+        XCTAssertEqual(
+            try ConsoleURLBuilder.resolvedOrigin(
+                environment: [ConsoleURLBuilder.environmentKey: "   "]
+            ).absoluteString,
+            "https://console.forgecode.dev"
         )
         XCTAssertThrowsError(try ConsoleURLBuilder.validateOrigin("file:///tmp"))
         XCTAssertThrowsError(try ConsoleURLBuilder.validateOrigin("https://example.com/path"))
@@ -126,6 +119,15 @@ final class CoreBehaviorTests: XCTestCase {
         XCTAssertEqual(sanitized["FORGE_DATA_DIR"], "/tmp/forge-data")
         XCTAssertNil(sanitized["AWS_SECRET_ACCESS_KEY"])
         XCTAssertNil(sanitized["OPENAI_API_KEY"])
+    }
+
+    func testSnapshotRevisionGateRejectsDuplicateAndOutOfOrderDelivery() {
+        var gate = ServiceSnapshotRevisionGate()
+        XCTAssertTrue(gate.accept(ServiceSnapshot(revision: 4, phase: .ready)))
+        XCTAssertFalse(gate.accept(ServiceSnapshot(revision: 3, phase: .starting)))
+        XCTAssertFalse(gate.accept(ServiceSnapshot(revision: 4, phase: .failed("duplicate"))))
+        XCTAssertTrue(gate.accept(ServiceSnapshot(revision: 5, phase: .disabled)))
+        XCTAssertEqual(gate.latestRevision, 5)
     }
 
     func testLoopbackEndpointUsesExactAddressAndURL() {

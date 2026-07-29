@@ -14,6 +14,14 @@ dist/
 .env
 .env.local
 
+# Vendored binary artifacts are never committed. The local runtime cache is
+# developer-only, and the Sparkle updater framework is fetched on demand by
+# macos/tools/fetch-sparkle.sh against a pinned checksum.
+macos/Vendor/
+
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Python bytecode from packaging helper modules
+__pycache__/

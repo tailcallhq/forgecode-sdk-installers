@@ -1,36 +1,42 @@
 import XCTest
-import Version
 @testable import ForgeMenuCore
 
 final class AppVersionTests: XCTestCase {
     func testParsesPlainAndTagStyleVersions() {
         XCTAssertEqual(AppVersion.parse("1.2.3"), Version(1, 2, 3))
-        // Git tags carry a leading `v`; the SDK's parse_release_version
-        // tolerates it, so we must too.
         XCTAssertEqual(AppVersion.parse("v1.2.3"), Version(1, 2, 3))
         XCTAssertEqual(AppVersion.parse("  v0.1.0 "), Version(0, 1, 0))
     }
 
-    func testRejectsGarbage() {
-        XCTAssertNil(AppVersion.parse("not-a-version"))
-        XCTAssertNil(AppVersion.parse(""))
-        // Guards against a naive "strip leading v" that would accept this.
-        XCTAssertNil(AppVersion.parse("version"))
-        XCTAssertNil(AppVersion.parse("1.2.3.4"))
+    func testParsesPrereleaseAndBuildMetadata() {
+        XCTAssertEqual(
+            AppVersion.parse("1.2.3-alpha.1+build.57"),
+            Version(
+                1,
+                2,
+                3,
+                prereleaseIdentifiers: ["alpha", "1"],
+                buildMetadataIdentifiers: ["build", "57"]
+            )
+        )
     }
 
-    func testRequiresAllThreeComponents() {
-        // Parsing is strict, so a two-component version would build fine and
-        // then render no version at all. scripts/common.sh rejects these at
-        // build time; this pins the behavior that makes that check necessary.
-        XCTAssertNil(AppVersion.parse("1.0"))
-        XCTAssertNil(AppVersion.parse("1"))
+    func testRejectsNonSemverInputs() {
+        for value in [
+            "not-a-version", "", "version", "vv1.2.3", "1.2.3.4",
+            "1.0", "1", "01.2.3", "1.02.3", "1.2.03", "1.2.3-",
+            "1.2.3+", "1.2.3-01", "1.2.3-alpha..1", "1.2.3+build..1",
+            "1.2.3 alpha", "V1.2.3"
+        ] {
+            XCTAssertNil(AppVersion.parse(value), "expected rejection: \(value)")
+        }
+    }
+
+    func testRejectsNumericOverflow() {
+        XCTAssertNil(AppVersion.parse("18446744073709551616.0.0"))
     }
 
     func testShippedDefaultVersionIsParseable() {
-        // Round-trips the value in the repository-root versions.sh. If someone
-        // sets APP_VERSION_DEFAULT to something this parser rejects, that must
-        // fail here rather than silently blank the version in the UI.
         let shipped = "0.1.0"
         XCTAssertEqual(AppVersion.parse(shipped)?.description, shipped)
     }
@@ -40,37 +46,43 @@ final class AppVersionTests: XCTestCase {
         XCTAssertFalse(AppVersion.isUpdate(from: version, to: version))
     }
 
-    func testComparesByPrecedenceNotLexicographically() throws {
-        // The bug a string comparison would introduce: "0.1.9" > "0.1.10".
+    func testComparesCoreVersionsNumerically() throws {
         let older = try XCTUnwrap(AppVersion.parse("0.1.9"))
         let newer = try XCTUnwrap(AppVersion.parse("0.1.10"))
         XCTAssertTrue(AppVersion.isUpdate(from: older, to: newer))
         XCTAssertFalse(AppVersion.isUpdate(from: newer, to: older))
     }
 
-    func testPrereleasePrecedesItsRelease() throws {
-        let beta = try XCTUnwrap(AppVersion.parse("1.0.0-beta"))
-        let release = try XCTUnwrap(AppVersion.parse("1.0.0"))
-        XCTAssertTrue(AppVersion.isUpdate(from: beta, to: release))
-        XCTAssertFalse(AppVersion.isUpdate(from: release, to: beta))
+    func testSemverPrereleasePrecedence() throws {
+        let ordered = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0"
+        ]
+        let versions = try ordered.map { try XCTUnwrap(AppVersion.parse($0)) }
+        for index in 0..<(versions.count - 1) {
+            XCTAssertLessThan(versions[index], versions[index + 1])
+        }
     }
 
-    func testBuildMetadataIsIgnoredWhenComparing() throws {
-        // Per semver, build metadata does not affect precedence, so a rebuild
-        // of the same version must not register as an available update.
+    func testBuildMetadataIsIgnoredForEqualityAndPrecedence() throws {
         let first = try XCTUnwrap(AppVersion.parse("1.2.3+14"))
         let second = try XCTUnwrap(AppVersion.parse("1.2.3+15"))
+        XCTAssertEqual(first, second)
         XCTAssertFalse(AppVersion.isUpdate(from: first, to: second))
         XCTAssertFalse(AppVersion.isUpdate(from: second, to: first))
     }
 
-    func testReadsVersionFromBundleInfoDictionary() {
-        // Under `swift test` there is no app bundle, so the value is absent
-        // rather than a misleading default.
-        XCTAssertNil(AppVersion.read(from: Bundle(for: AppVersionTests.self)))
+    func testDescriptionCanonicalizesOnlyTagWhitespace() {
+        XCTAssertEqual(AppVersion.parse(" v1.2.3-alpha+build ")?.description, "1.2.3-alpha+build")
     }
 
-    func testDescriptionDropsTheTagPrefix() {
-        XCTAssertEqual(AppVersion.parse("v0.1.0")?.description, "0.1.0")
+    func testReadsVersionFromBundleInfoDictionary() {
+        XCTAssertNil(AppVersion.read(from: Bundle(for: AppVersionTests.self)))
     }
 }

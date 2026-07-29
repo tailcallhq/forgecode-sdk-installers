@@ -2,6 +2,7 @@ import AppKit
 import ForgeMenuCore
 import Foundation
 import ServiceManagement
+import Sparkle
 
 @main
 @MainActor
@@ -15,6 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let preferences = AppPreferences()
     private let logger = AppLogger.shared
+    // Sparkle drives application self-updates from the appcast feed declared
+    // in Info.plist (SUFeedURL) and verifies each download against the
+    // embedded EdDSA public key (SUPublicEDKey) plus Developer ID signing.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private var statusItem: NSStatusItem!
     private var popoverController: PopoverController!
     private var serviceController: ServiceController!
@@ -27,19 +36,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let paths = try RuntimePaths.resolve()
+            let runtimeRoot = RuntimeStore.defaultRoot()
+            let runtimeLease = RuntimeStoreLease(rootURL: runtimeRoot)
+            let runtimeInstaller = RuntimeInstaller(rootURL: runtimeRoot)
             let processHost = ForgeProcessHost(
-                configuration: .init(
-                    executableURL: paths.forgeExecutable,
-                    logURL: paths.serviceLog
-                ),
-                logger: logger
+                configuration: .init(logURL: paths.serviceLog),
+                logger: logger,
+                lease: runtimeLease
             )
             let supervisor = ServiceSupervisor(
                 processHost: processHost,
+                runtimeInstaller: runtimeInstaller,
                 clientFactory: { endpoint in WebSocketRPCClient(endpoint: endpoint.webSocketURL) },
                 logger: logger
             )
-            serviceController = ServiceController(preferences: preferences, supervisor: supervisor)
+            serviceController = ServiceController(supervisor: supervisor)
 
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
             statusItem.button?.image = ForgeCodeLogo.statusImage()
@@ -48,16 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.action = #selector(togglePopover(_:))
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-            popoverController = PopoverController(preferences: preferences)
+            popoverController = PopoverController()
             wireActions(paths: paths)
             serviceController.onSnapshotChanged = { [weak self] snapshot in
                 guard let self else { return }
                 self.popoverController.update(snapshot: snapshot, loginItemState: self.loginItemState)
-                self.updateStatusIcon(snapshot.phase)
+                self.updateStatusItem(snapshot)
             }
             synchronizeLoginPreference()
             popoverController.update(snapshot: serviceController.snapshot, loginItemState: loginItemState)
-            serviceController.startAccordingToPreference()
+            serviceController.start()
         } catch {
             logger.error(error.localizedDescription)
             presentFatalError(error.localizedDescription)
@@ -90,15 +101,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func wireActions(paths: RuntimePaths) {
         popoverController.onWillShow = { [weak self] in self?.synchronizeLoginPreference() }
-        popoverController.onRunServiceChanged = { [weak self] enabled in
-            self?.serviceController.setRunService(enabled)
-        }
         popoverController.onLaunchAtLoginChanged = { [weak self] enabled in
             self?.setLaunchAtLogin(enabled)
         }
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
         popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
-        popoverController.onRestart = { [weak self] in self?.serviceController.restart() }
+        popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
         popoverController.onOpenLogs = { [weak self] in
             do {
                 try FileManager.default.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
@@ -106,9 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 self?.presentActionError(title: "Logs could not be opened", error: error)
             }
-        }
-        popoverController.onConfigureConsoleOrigin = { [weak self] in
-            self?.configureConsoleOrigin()
         }
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()
@@ -122,40 +127,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
             self?.presentActionError(title: "ForgeCode needs attention", error: error)
         }
+        popoverController.onCheckForUpdates = { [weak self] in self?.checkForUpdates() }
         popoverController.onQuit = { NSApp.terminate(nil) }
-    }
-
-    private func configureConsoleOrigin() {
-        let current = (try? ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin).absoluteString)
-            ?? ConsoleURLBuilder.defaultOrigin
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "ForgeCode Console Origin"
-        alert.informativeText = "Enter an HTTP or HTTPS origin. The FORGE_CONSOLE_ORIGIN environment variable takes precedence when set."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Use Default")
-        let field = NSTextField(string: current)
-        field.placeholderString = ConsoleURLBuilder.defaultOrigin
-        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
-        alert.accessoryView = field
-        let response = alert.runModal()
-        if response == .alertThirdButtonReturn {
-            preferences.consoleOrigin = nil
-            return
-        }
-        guard response == .alertFirstButtonReturn else { return }
-        do {
-            _ = try ConsoleURLBuilder.validateOrigin(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
-            preferences.consoleOrigin = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            presentActionError(title: "Console origin is invalid", error: error)
-        }
     }
 
     private func openFrontend() {
         do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let origin = try ConsoleURLBuilder.resolvedOrigin()
             let url = try ConsoleURLBuilder.consoleURL(
                 origin: origin,
                 endpoint: serviceController.snapshot.endpoint
@@ -171,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openConversation(_ conversationID: String) {
         do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin(preference: preferences.consoleOrigin)
+            let origin = try ConsoleURLBuilder.resolvedOrigin()
             let url = try ConsoleURLBuilder.conversationURL(
                 conversationID: conversationID,
                 origin: origin,
@@ -190,6 +168,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu(title: "Main Menu")
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
+        let checkForUpdates = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdates.target = updaterController
+        appMenu.addItem(checkForUpdates)
+        appMenu.addItem(.separator())
         let quit = NSMenuItem(
             title: "Quit ForgeCode",
             action: #selector(NSApplication.terminate(_:)),
@@ -201,6 +187,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
+    }
+
+    private func checkForUpdates() {
+        // The update alert is an ordinary window; an accessory app must
+        // activate so the panel actually comes to the front.
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(nil)
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
@@ -235,7 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .enabled: return .enabled
         case .notRegistered: return .disabled
         case .requiresApproval: return .requiresApproval
-        case .notFound: return .unavailable("The app must be installed in Applications.")
+        // `.notFound` is what macOS reports for a main-app login item that has
+        // never been registered, so it must remain toggleable; if registration
+        // is truly impossible, `register()` throws and the error alert explains.
+        case .notFound: return .disabled
         @unknown default: return .unavailable("macOS returned an unknown login item status.")
         }
     }
@@ -270,14 +266,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.toggle(relativeTo: sender)
     }
 
-    private func updateStatusIcon(_ phase: ServicePhase) {
-        statusItem.button?.image = ForgeCodeLogo.statusImage()
-        statusItem.button?.image?.isTemplate = true
-        switch phase {
-        case .ready: statusItem.button?.contentTintColor = nil
-        case .starting, .restarting: statusItem.button?.contentTintColor = .controlAccentColor
-        case .failed: statusItem.button?.contentTintColor = .systemOrange
-        case .disabled, .stopped: statusItem.button?.contentTintColor = .secondaryLabelColor
+    private func updateStatusItem(_ snapshot: ServiceSnapshot) {
+        guard let button = statusItem.button else { return }
+        button.image = ForgeCodeLogo.statusImage()
+        button.image?.isTemplate = true
+        let presentation = PopoverPresentation.make(snapshot: snapshot)
+        let accessibilityStatus = "\(presentation.serviceTitle), \(presentation.serviceDetail)"
+        button.setAccessibilityLabel(accessibilityStatus)
+        button.setAccessibilityHelp("Open ForgeCode status")
+        button.toolTip = accessibilityStatus
+        switch snapshot.phase {
+        case .ready: button.contentTintColor = nil
+        case .installing, .starting, .restarting: button.contentTintColor = .controlAccentColor
+        case .installationFailed, .failed: button.contentTintColor = .systemOrange
+        case .disabled, .stopped: button.contentTintColor = .secondaryLabelColor
         }
     }
 

@@ -10,7 +10,6 @@ export BUILD_FLAVOR
 
 packaging_preflight
 run_tests
-sh "$SCRIPT_DIR/fetch-forge3.sh"
 sh "$SCRIPT_DIR/assemble-app.sh"
 sh "$SCRIPT_DIR/sign-app.sh"
 sh "$SCRIPT_DIR/notarize-app.sh"

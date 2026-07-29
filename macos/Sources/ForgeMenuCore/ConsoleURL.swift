@@ -5,20 +5,14 @@ public enum ConsoleURLBuilder {
     public static let environmentKey = "FORGE_CONSOLE_ORIGIN"
 
     public static func resolvedOrigin(
-        preference: String?,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> URL {
         let environmentValue = environment[environmentKey]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let preferenceValue = preference?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = [environmentValue, preferenceValue, defaultOrigin]
-            .compactMap { candidate -> String? in
-                guard let candidate, !candidate.isEmpty else { return nil }
-                return candidate
-            }
-            .first ?? defaultOrigin
-        return try validateOrigin(value)
+        guard let environmentValue, !environmentValue.isEmpty else {
+            return try validateOrigin(defaultOrigin)
+        }
+        return try validateOrigin(environmentValue)
     }
 
     public static func validateOrigin(_ value: String) throws -> URL {

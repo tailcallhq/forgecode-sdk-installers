@@ -1,36 +1,17 @@
 import Foundation
 
 public final class AppPreferences: @unchecked Sendable {
-    public static let runServiceKey = "runForgeService"
     public static let launchAtLoginKey = "launchAtLogin"
-    public static let consoleOriginKey = "consoleOrigin"
 
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        defaults.register(defaults: [Self.runServiceKey: true])
-    }
-
-    public var runService: Bool {
-        get { defaults.bool(forKey: Self.runServiceKey) }
-        set { defaults.set(newValue, forKey: Self.runServiceKey) }
     }
 
     public var launchAtLogin: Bool {
         get { defaults.bool(forKey: Self.launchAtLoginKey) }
         set { defaults.set(newValue, forKey: Self.launchAtLoginKey) }
-    }
-
-    public var consoleOrigin: String? {
-        get { defaults.string(forKey: Self.consoleOriginKey) }
-        set {
-            if let newValue, !newValue.isEmpty {
-                defaults.set(newValue, forKey: Self.consoleOriginKey)
-            } else {
-                defaults.removeObject(forKey: Self.consoleOriginKey)
-            }
-        }
     }
 }
 
