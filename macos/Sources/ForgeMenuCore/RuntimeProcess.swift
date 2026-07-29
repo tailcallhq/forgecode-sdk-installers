@@ -135,7 +135,10 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
 
         let selectedExecutable = executable.standardizedFileURL
         let pinnedExecutable = try expectedIdentity.map {
-            try RuntimePinnedExecutable(url: selectedExecutable, expectedIdentity: $0)
+            try RuntimePinnedExecutable(
+                url: selectedExecutable,
+                expectedIdentity: $0
+            )
         }
         defer { pinnedExecutable?.close() }
         var stdoutDescriptors = [Int32](repeating: 0, count: 2)

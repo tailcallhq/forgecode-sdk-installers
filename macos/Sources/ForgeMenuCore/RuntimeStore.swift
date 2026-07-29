@@ -53,6 +53,7 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
     public let rootURL: URL
     private let fileManager: FileManager
     private let validator: any RuntimeExecutableValidating
+    private let expectedUserID: uid_t
     private let commitHooks: CommitHooks
     private let lease: RuntimeStoreLease
     private let encoder: JSONEncoder
@@ -66,12 +67,14 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
         rootURL: URL,
         fileManager: FileManager = .default,
         validator: any RuntimeExecutableValidating = MachORuntimeValidator(),
+        expectedUserID: uid_t = geteuid(),
         commitHooks: CommitHooks = CommitHooks(),
         lease: RuntimeStoreLease? = nil
     ) {
         self.rootURL = rootURL.standardizedFileURL
         self.fileManager = fileManager
         self.validator = validator
+        self.expectedUserID = expectedUserID
         self.commitHooks = commitHooks
         self.lease = lease ?? RuntimeStoreLease(rootURL: self.rootURL)
         encoder = JSONEncoder()
@@ -200,21 +203,13 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
             try commitHooks.afterDestinationMove()
             try checkCancellation()
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destination.path)
-            guard var installed = try validate(
-                directory: destination,
-                expectedVersion: receipt.version,
-                expectedArchitecture: receipt.architecture,
-                requireSealed: false
-            ) else {
-                throw RuntimeInstallerError.untrustedStoreItem("staging did not produce a valid runtime")
-            }
-            try checkCancellation()
-            try sealInstalledRuntime(directory: destination)
-            installed = try validate(
+            guard let installed = try validate(
                 directory: destination,
                 expectedVersion: receipt.version,
                 expectedArchitecture: receipt.architecture
-            ) ?? installed
+            ) else {
+                throw RuntimeInstallerError.untrustedStoreItem("staging did not produce a valid runtime")
+            }
             try checkCancellation()
             try activate(receipt.version)
             return installed
@@ -292,7 +287,7 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
             throw RuntimeFilesystemError.posix(errno, operation: "inspect runtime store directory", path: directory.path)
         }
         guard (info.st_mode & S_IFMT) == S_IFDIR,
-              info.st_uid == geteuid(),
+              info.st_uid == expectedUserID,
               info.st_mode & 0o022 == 0,
               exactPermissions.map({ info.st_mode & 0o777 == $0 }) ?? true
         else { throw RuntimeInstallerError.untrustedStoreItem("insecure \(label) \(directory.path)") }
@@ -306,7 +301,7 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
         var info = stat()
         guard lstat(url.path, &info) == 0,
               (info.st_mode & S_IFMT) == S_IFREG,
-              info.st_uid == geteuid(),
+              info.st_uid == expectedUserID,
               info.st_nlink == 1,
               info.st_mode & 0o022 == 0,
               exactPermissions.map({ info.st_mode & 0o777 == $0 }) ?? true
@@ -334,14 +329,13 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
     private func validate(
         directory: URL,
         expectedVersion: RuntimeReleaseVersion,
-        expectedArchitecture: RuntimeArchitecture,
-        requireSealed: Bool = true
+        expectedArchitecture: RuntimeArchitecture
     ) throws -> InstalledRuntime? {
         guard try itemExistsNoFollow(directory) else { return nil }
         try validatePrivateDirectory(
             directory,
             label: "runtime directory",
-            exactPermissions: requireSealed ? 0o500 : 0o700
+            exactPermissions: 0o700
         )
         let contents = try fileManager.contentsOfDirectory(atPath: directory.path)
         guard Set(contents) == Set(["forge3", "receipt.json"]) else {
@@ -350,42 +344,39 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
 
         let executable = directory.appendingPathComponent("forge3")
         let receiptURL = directory.appendingPathComponent("receipt.json")
-        try validateRegularFileNoFollow(
-            executable,
-            label: "runtime executable",
-            exactPermissions: requireSealed ? 0o500 : 0o700
-        )
+        try validateManagedExecutable(executable)
         try validateRegularFileNoFollow(
             receiptURL,
             label: "runtime receipt",
-            exactPermissions: requireSealed ? 0o400 : 0o600
+            exactPermissions: 0o600
         )
 
         let data = try readRegularFileNoFollow(receiptURL, maximumBytes: 4_096, permissionsMustBePrivate: true)
-        let receipt: RuntimeStoreReceipt
         do {
-            receipt = try decoder.decode(RuntimeStoreReceipt.self, from: data)
+            _ = try decoder.decode(RuntimeStoreReceipt.self, from: data)
         } catch {
             throw RuntimeInstallerError.untrustedStoreItem("receipt is invalid")
         }
-        guard receipt.formatVersion == RuntimeStoreReceipt.format,
-              receipt.version == expectedVersion,
-              receipt.architecture == expectedArchitecture,
-              isLowercaseSHA256(receipt.archiveSHA256),
-              isLowercaseSHA256(receipt.executableSHA256)
-        else { throw RuntimeInstallerError.untrustedStoreItem("receipt identity does not match its path") }
-        let executableIdentity = try RuntimeExecutableIdentityValidator.capture(
-            executable,
-            expectedSHA256: receipt.executableSHA256
-        )
-        try validator.validate(executableURL: executable, expectedArchitecture: expectedArchitecture)
-        try RuntimeExecutableIdentityValidator.validate(executable, expected: executableIdentity)
         return InstalledRuntime(
             version: expectedVersion,
             architecture: expectedArchitecture,
-            executableURL: executable,
-            executableIdentity: executableIdentity
+            executableURL: executable
         )
+    }
+
+    private func validateManagedExecutable(_ executable: URL) throws {
+        var info = stat()
+        guard lstat(executable.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == expectedUserID,
+              info.st_nlink == 1,
+              info.st_mode & 0o022 == 0,
+              info.st_mode & 0o100 != 0
+        else {
+            throw RuntimeInstallerError.untrustedStoreItem(
+                "unsafe runtime executable \(executable.path)"
+            )
+        }
     }
 
     private func activate(_ version: RuntimeReleaseVersion) throws {
@@ -458,42 +449,6 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
     private func removeItemNoFollow(_ url: URL) throws {
         guard try itemExistsNoFollow(url) else { return }
         try fileManager.removeItem(at: url)
-    }
-
-    private func sealInstalledRuntime(directory: URL) throws {
-        let directoryDescriptor = open(
-            directory.path,
-            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
-        )
-        guard directoryDescriptor >= 0 else {
-            throw RuntimeFilesystemError.posix(
-                errno,
-                operation: "open installed runtime directory for sealing",
-                path: directory.path
-            )
-        }
-        defer { close(directoryDescriptor) }
-        try setManagedMode(
-            directoryDescriptor: directoryDescriptor,
-            name: "forge3",
-            expectedType: S_IFREG,
-            mode: 0o500,
-            operation: "seal installed runtime executable"
-        )
-        try setManagedMode(
-            directoryDescriptor: directoryDescriptor,
-            name: "receipt.json",
-            expectedType: S_IFREG,
-            mode: 0o400,
-            operation: "seal installed runtime receipt"
-        )
-        guard fchmod(directoryDescriptor, 0o500) == 0 else {
-            throw RuntimeFilesystemError.posix(
-                errno,
-                operation: "seal installed runtime directory",
-                path: directory.path
-            )
-        }
     }
 
     private func removeRuntimeDirectoryNoFollow(_ directory: URL) throws {
@@ -569,39 +524,6 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
             )
         }
         try removeItemNoFollow(directory)
-    }
-
-    private func setManagedMode(
-        directoryDescriptor: Int32,
-        name: String,
-        expectedType: mode_t,
-        mode: mode_t,
-        operation: String
-    ) throws {
-        var info = stat()
-        let statResult = name.withCString {
-            fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW)
-        }
-        guard statResult == 0,
-              (info.st_mode & S_IFMT) == expectedType,
-              info.st_uid == geteuid(),
-              info.st_nlink == 1,
-              info.st_mode & 0o022 == 0
-        else {
-            throw RuntimeInstallerError.untrustedStoreItem(
-                "refusing to change permissions on unmanaged runtime item \(name)"
-            )
-        }
-        let descriptor = name.withCString {
-            openat(directoryDescriptor, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        }
-        guard descriptor >= 0 else {
-            throw RuntimeFilesystemError.posix(errno, operation: operation, path: name)
-        }
-        defer { close(descriptor) }
-        guard fchmod(descriptor, mode) == 0 else {
-            throw RuntimeFilesystemError.posix(errno, operation: operation, path: name)
-        }
     }
 
     private func recoverCurrent(architecture: RuntimeArchitecture) throws -> InstalledRuntime? {
@@ -728,9 +650,4 @@ public final class RuntimeStore: RuntimeStoreManaging, @unchecked Sendable {
         if Task.isCancelled { throw RuntimeInstallerError.cancelled }
     }
 
-    private func isLowercaseSHA256(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { character in
-            character.isASCII && (character.isNumber || ("a"..."f").contains(character))
-        }
-    }
 }

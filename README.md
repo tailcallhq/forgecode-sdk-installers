@@ -28,14 +28,13 @@ parses it strictly.
 
 The service runtime has a separate lifecycle from desktop releases. It is first
 installed when the user asks ForgeCode to run the service, then reused from its
-runtime installation location. Cached installer reuse means exactly zero
-`RuntimeNetworkClient` requests: no manifest, archive, checksum, startup, or
-background installer request is made after a valid installation exists. Runtime
-versions, archives, checksums, manifests, and download credentials are therefore
-not packaging inputs. Separately, the launched public `forge3` runtime has its
-own internal update notifier. That known SDK limitation is not installer
-traffic; see the macOS README for details and the accepted same-origin download
-and ad-hoc-signature trust boundaries.
+managed runtime location. The initial install retains network, checksum,
+archive, Mach-O, signature, and quarantine validation. Later cache recovery and
+launch trust the current managed executable by path and minimal file safety
+only, allowing `forge3` to replace itself without stale receipt hashes, versions,
+sizes, or inode identity forcing a download. Cached reuse makes exactly zero
+`RuntimeNetworkClient` requests. The launched public `forge3` runtime separately
+has its own internal update notifier; see the macOS README for details.
 
 ForgeCode is pre-1.0 and not a stable release.
 

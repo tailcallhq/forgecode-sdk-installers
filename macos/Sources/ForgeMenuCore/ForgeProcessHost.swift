@@ -12,25 +12,19 @@ public protocol InstalledRuntimeIdentityValidating: Sendable {
 }
 
 public struct InstalledRuntimeIdentityValidator: InstalledRuntimeIdentityValidating {
-    private let executableValidator: any RuntimeExecutableValidating
+    private let expectedUserID: uid_t
 
-    public init(executableValidator: any RuntimeExecutableValidating = MachORuntimeValidator()) {
-        self.executableValidator = executableValidator
+    public init(expectedUserID: uid_t = geteuid()) {
+        self.expectedUserID = expectedUserID
     }
 
     public func validate(_ runtime: InstalledRuntime) throws {
-        guard runtime.architecture == .native else {
-            throw RuntimeInstallerError.wrongArchitecture(
-                expected: .native,
-                actual: runtime.architecture.rawValue
-            )
-        }
-        try runtime.validateExecutableIdentity()
-        try executableValidator.validate(
-            executableURL: runtime.executableURL.standardizedFileURL,
-            expectedArchitecture: runtime.architecture
+        let pinned = try RuntimePinnedExecutable(
+            url: runtime.executableURL,
+            expectedUserID: expectedUserID
         )
-        try runtime.validateExecutableIdentity()
+        defer { pinned.close() }
+        try pinned.validateCurrentFile()
     }
 }
 
@@ -157,19 +151,13 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     private func startLocked(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) throws {
         guard pid == 0 else { throw ForgeCoreError.processAlreadyRunning }
         try runtimeIdentityValidator.validate(runtime)
-        guard let executableIdentity = runtime.executableIdentity else {
-            throw RuntimeInstallerError.untrustedStoreItem("runtime executable identity is unavailable")
-        }
         let executionLease = try lease?.acquire(.sharedExecution)
         var retainExecutionLease = false
         defer {
             if !retainExecutionLease { executionLease?.release() }
         }
         let selectedExecutable = runtime.executableURL.standardizedFileURL
-        let pinnedExecutable = try RuntimePinnedExecutable(
-            url: selectedExecutable,
-            expectedIdentity: executableIdentity
-        )
+        let pinnedExecutable = try RuntimePinnedExecutable(url: selectedExecutable)
         defer { pinnedExecutable.close() }
         guard FileManager.default.isExecutableFile(atPath: selectedExecutable.path) else {
             throw ForgeCoreError.missingExecutable(selectedExecutable.path)

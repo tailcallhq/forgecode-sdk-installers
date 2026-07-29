@@ -28,14 +28,16 @@ private enum ForgeRuntimeSmokeHelper {
             guard FileManager.default.isExecutableFile(atPath: runtime.executableURL.path) else {
                 throw RuntimeInstallerError.untrustedStoreItem("installed runtime is not executable")
             }
-            try runtime.validateExecutableIdentity()
+            try InstalledRuntimeIdentityValidator().validate(runtime)
 
             let restartedInstaller = RuntimeInstaller(rootURL: rootURL)
             let cached = try await restartedInstaller.installedCurrentRuntime()
             guard cached == runtime else {
                 throw RuntimeInstallerError.untrustedStoreItem("cold-restarted current runtime did not match the activated runtime")
             }
-            try cached?.validateExecutableIdentity()
+            if let cached {
+                try InstalledRuntimeIdentityValidator().validate(cached)
+            }
             result = SmokeResult(
                 succeeded: true,
                 version: runtime.version.rawValue,

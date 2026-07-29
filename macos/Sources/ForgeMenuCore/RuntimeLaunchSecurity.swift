@@ -18,10 +18,16 @@ struct RuntimePinnedExecutable {
     let directoryDescriptor: Int32
     let basename: String
     let displayPath: String
-    let expectedIdentity: RuntimeExecutableIdentity
+    let expectedUserID: uid_t
+    let expectedIdentity: RuntimeExecutableIdentity?
 
-    init(url: URL, expectedIdentity: RuntimeExecutableIdentity) throws {
+    init(
+        url: URL,
+        expectedUserID: uid_t = geteuid(),
+        expectedIdentity: RuntimeExecutableIdentity? = nil
+    ) throws {
         let executable = url.standardizedFileURL
+        try Self.validatePathTraversal(to: executable, expectedUserID: expectedUserID)
         let directory = executable.deletingLastPathComponent()
         let basename = executable.lastPathComponent
         guard !basename.isEmpty,
@@ -45,7 +51,7 @@ struct RuntimePinnedExecutable {
             var info = stat()
             guard fstat(descriptor, &info) == 0,
                   (info.st_mode & S_IFMT) == S_IFDIR,
-                  info.st_uid == geteuid(),
+                  info.st_uid == expectedUserID,
                   info.st_mode & 0o022 == 0
             else {
                 throw RuntimeInstallerError.untrustedStoreItem(
@@ -55,6 +61,7 @@ struct RuntimePinnedExecutable {
             self.directoryDescriptor = descriptor
             self.basename = basename
             displayPath = executable.path
+            self.expectedUserID = expectedUserID
             self.expectedIdentity = expectedIdentity
         } catch {
             Darwin.close(descriptor)
@@ -64,6 +71,42 @@ struct RuntimePinnedExecutable {
 
     func close() {
         Darwin.close(directoryDescriptor)
+    }
+
+    private static func validatePathTraversal(to executable: URL, expectedUserID: uid_t) throws {
+        let components = executable.pathComponents.dropFirst().dropLast()
+        var current = URL(fileURLWithPath: "/", isDirectory: true)
+        var enteredUserBoundary = false
+        for component in components {
+            current.appendPathComponent(component, isDirectory: true)
+            var info = stat()
+            guard lstat(current.path, &info) == 0 else {
+                throw RuntimeFilesystemError.posix(
+                    errno,
+                    operation: "inspect runtime executable path component",
+                    path: current.path
+                )
+            }
+            if info.st_uid == expectedUserID { enteredUserBoundary = true }
+            if (info.st_mode & S_IFMT) == S_IFLNK {
+                if enteredUserBoundary {
+                    throw RuntimeInstallerError.untrustedStoreItem(
+                        "runtime executable path contains a symbolic link at \(current.path)"
+                    )
+                }
+                continue
+            }
+            guard (info.st_mode & S_IFMT) == S_IFDIR else {
+                throw RuntimeInstallerError.untrustedStoreItem(
+                    "runtime executable path component is not a directory at \(current.path)"
+                )
+            }
+            if enteredUserBoundary, info.st_mode & 0o022 != 0 {
+                throw RuntimeInstallerError.untrustedStoreItem(
+                    "runtime executable path component is not private at \(current.path)"
+                )
+            }
+        }
     }
 
     func addDirectoryActions(to actions: inout posix_spawn_file_actions_t?) throws {
@@ -86,28 +129,35 @@ struct RuntimePinnedExecutable {
         hooks: RuntimePinnedLaunchHooks
     ) throws -> Int32 {
         try hooks.beforeFinalIdentityValidation()
-        try validateAdjacentIdentity()
+        try validateCurrentFile()
         return posix_spawn(&pid, basename, &actions, &attributes, &argv, &envp)
     }
 
-    private func validateAdjacentIdentity() throws {
+    func validateCurrentFile() throws {
         var info = stat()
         let result = basename.withCString {
             fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW)
         }
         guard result == 0,
               (info.st_mode & S_IFMT) == S_IFREG,
-              info.st_uid == geteuid(),
+              info.st_uid == expectedUserID,
               info.st_nlink == 1,
               info.st_mode & 0o022 == 0,
-              info.st_mode & 0o100 != 0,
-              info.st_size == expectedIdentity.size,
-              UInt64(info.st_dev) == expectedIdentity.device,
-              UInt64(info.st_ino) == expectedIdentity.inode
+              info.st_mode & 0o100 != 0
         else {
             throw RuntimeInstallerError.untrustedStoreItem(
-                "runtime executable identity changed at the launch boundary"
+                "runtime executable is unsafe at the launch boundary"
             )
+        }
+        if let expectedIdentity {
+            guard info.st_size == expectedIdentity.size,
+                  UInt64(info.st_dev) == expectedIdentity.device,
+                  UInt64(info.st_ino) == expectedIdentity.inode
+            else {
+                throw RuntimeInstallerError.untrustedStoreItem(
+                    "runtime executable identity changed at the launch boundary"
+                )
+            }
         }
     }
 
