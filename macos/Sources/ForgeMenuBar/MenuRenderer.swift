@@ -728,7 +728,17 @@ private final class CommandRowView: NSView {
     /// Identifier carried by conversation rows.
     var representedID: String?
     private var trackingAreaRef: NSTrackingArea?
-    private var isHovered = false { didSet { needsDisplay = true } }
+    private var isHovered = false {
+        didSet {
+            guard isHovered != oldValue else { return }
+            needsDisplay = true
+            applyContentColors()
+        }
+    }
+    /// Tint requested by `configure`, retained so the hover state can swap
+    /// between it and the on-highlight variant without the caller
+    /// reconfiguring the row.
+    private var restingTint: NSColor?
 
     var isEnabled = true {
         didSet {
@@ -823,15 +833,32 @@ private final class CommandRowView: NSView {
         showsDisclosure: Bool
     ) {
         iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        iconView.contentTintColor = tint ?? .secondaryLabelColor
+        restingTint = tint
         titleLabel.stringValue = title
         titleLabel.font = titleFont
-        titleLabel.textColor = tint ?? .labelColor
+        applyContentColors()
         trailingLabel.stringValue = trailingText ?? ""
         trailingLabel.isHidden = trailingText == nil
         chevronView.isHidden = !showsDisclosure
         chevronTrailingConstraint?.isActive = showsDisclosure
         plainTrailingConstraint?.isActive = !showsDisclosure
+    }
+
+    /// The hover highlight is a saturated, fully opaque fill, so row content
+    /// switches to the matching foreground color to stay legible on top of it.
+    private func applyContentColors() {
+        if isHovered {
+            let onHighlight = NSColor.alternateSelectedControlTextColor
+            iconView.contentTintColor = onHighlight
+            titleLabel.textColor = onHighlight
+            trailingLabel.textColor = onHighlight.withAlphaComponent(0.75)
+            chevronView.contentTintColor = onHighlight.withAlphaComponent(0.75)
+        } else {
+            iconView.contentTintColor = restingTint ?? .secondaryLabelColor
+            titleLabel.textColor = restingTint ?? .labelColor
+            trailingLabel.textColor = .tertiaryLabelColor
+            chevronView.contentTintColor = .tertiaryLabelColor
+        }
     }
 
     override func updateTrackingAreas() {
@@ -899,7 +926,10 @@ private final class CommandRowView: NSView {
             focusPath.stroke()
         }
         guard isHovered else { return }
-        NSColor.selectedContentBackgroundColor.withAlphaComponent(0.28).setFill()
+        // Fully opaque and using the brighter accent rather than the muted
+        // selection background: the previous 0.28 wash let the dark popover
+        // show through and read as washed-out lavender.
+        NSColor.controlAccentColor.setFill()
         NSBezierPath(roundedRect: highlight, xRadius: 5, yRadius: 5).fill()
     }
 
