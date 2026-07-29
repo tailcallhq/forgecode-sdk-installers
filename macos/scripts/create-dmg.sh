@@ -58,7 +58,11 @@ safe_remove "$stage" "$rw_dmg" "$staged_dmg" "$attach_plist" "$verify_attach_pli
 safe_remove_unmounted "$mount_dir" "$verify_mount"
 mkdir -p "$stage"
 ditto "$APP_BUNDLE" "$stage/$APP_NAME.app"
-install -m 0644 "$assets_dir/dmg-background.png" "$stage/.background.png"
+# Staged with a plain (non-dot) name: Finder cannot resolve a dot-file at the
+# volume root when it is not showing hidden files, which makes the layout
+# script's `set background picture` fail with -10006 (this is the default on
+# CI runners). It is made invisible with `chflags hidden` after the layout pass.
+install -m 0644 "$assets_dir/dmg-background.png" "$stage/background.png"
 ln -s /Applications "$stage/Applications"
 
 hdiutil create -quiet -fs HFS+ -format UDRW -volname "$APP_NAME" -srcfolder "$stage" "$rw_dmg"
@@ -87,7 +91,7 @@ xattr -wx com.apple.FinderInfo \
 osascript -e 'on run argv
     tell application "Finder" to set position of item ".VolumeIcon.icns" of folder (POSIX file (item 1 of argv) as alias) to {900, 270}
 end run' "$mount_dir"
-chflags hidden "$mount_dir/.background.png" "$mount_dir/.VolumeIcon.icns"
+chflags hidden "$mount_dir/background.png" "$mount_dir/.VolumeIcon.icns"
 # HFS+ may create filesystem-event bookkeeping while mounted. It is not part of
 # the release payload, so remove it before freezing and verifying the allowlist.
 if [ -d "$mount_dir/.fseventsd" ]; then

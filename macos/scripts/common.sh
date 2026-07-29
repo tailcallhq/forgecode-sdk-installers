@@ -537,7 +537,7 @@ expected_directories = {
 expected_files = {
     ".DS_Store",
     ".VolumeIcon.icns",
-    ".background.png",
+    "background.png",
     f"{app}/Contents/Info.plist",
     f"{app}/Contents/PkgInfo",
     f"{app}/Contents/MacOS/{executable}",

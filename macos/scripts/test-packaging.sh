@@ -56,7 +56,7 @@ make_fixture_dmg_mount() {
   mkdir -p "$mount_root"
   make_fixture_app "$mount_root/$APP_NAME.app"
   printf 'finder-layout-fixture' > "$mount_root/.DS_Store"
-  printf 'background-fixture' > "$mount_root/.background.png"
+  printf 'background-fixture' > "$mount_root/background.png"
   printf 'volume-icon-fixture' > "$mount_root/.VolumeIcon.icns"
   ln -s /Applications "$mount_root/Applications"
 }
