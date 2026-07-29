@@ -13,23 +13,19 @@ private struct RejectingRuntimeIdentityValidator: InstalledRuntimeIdentityValida
     }
 }
 
-private struct PermissiveExecutableValidator: RuntimeExecutableValidating {
-    func validate(executableURL: URL, expectedArchitecture: RuntimeArchitecture) throws {}
-}
-
 final class ProcessIntegrationTests: XCTestCase {
-    func testProcessHostRejectsExecutableReplacementAtAdjacentLaunchValidation() async throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'original-must-not-run\\n'\n")
+    func testProcessHostAcceptsSafeSelfReplacementAtAdjacentLaunchValidation() async throws {
+        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'original-must-not-run\\n'\nsleep 30\n")
         defer { fixture.remove() }
-        let identity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
+        let originalIdentity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
         let runtime = InstalledRuntime(
             version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
             architecture: .native,
             executableURL: fixture.scriptURL,
-            executableIdentity: identity
+            executableIdentity: originalIdentity
         )
         let replacement = fixture.directory.appendingPathComponent("replacement")
-        try Data("#!/bin/sh\nprintf 'replacement-must-not-run\\n'\n".utf8).write(to: replacement)
+        try Data("#!/bin/sh\nprintf 'self-replaced-runtime\\n'\nsleep 30\n".utf8).write(to: replacement)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
         let host = ForgeProcessHost(
             configuration: .init(
@@ -42,16 +38,13 @@ final class ProcessIntegrationTests: XCTestCase {
             runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
         )
 
-        do {
-            try await host.start(runtime: runtime, endpoint: LoopbackEndpoint(port: 55_444), generation: 1)
-            XCTFail("replacement at the adjacent validation boundary must be rejected")
-        } catch {
-            XCTAssertEqual(
-                error as? RuntimeInstallerError,
-                .untrustedStoreItem("runtime executable identity changed at the launch boundary")
-            )
-        }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.logURL.path))
+        try await host.start(runtime: runtime, endpoint: LoopbackEndpoint(port: 55_444), generation: 1)
+        try await waitForFile(fixture.logURL, containing: "self-replaced-runtime")
+        XCTAssertNotEqual(try inode(fixture.scriptURL), originalIdentity.inode)
+        await host.stop(gracePeriod: 0.1)
+        let log = try String(contentsOf: fixture.logURL)
+        XCTAssertTrue(log.contains("self-replaced-runtime"))
+        XCTAssertFalse(log.contains("original-must-not-run"))
     }
 
     func testProcessHostPinnedParentPreventsAncestorReplacementRedirect() async throws {
@@ -264,41 +257,77 @@ final class ProcessIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.logURL.path))
     }
 
-    func testDefaultProcessIdentityValidatorRequiresAndRechecksReceiptIdentity() throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'must-not-run\\n'\n")
+    func testDefaultProcessValidatorAcceptsSafeCurrentFileWithoutReceiptIdentity() throws {
+        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'safe\\n'\n")
         defer { fixture.remove() }
-        let validator = InstalledRuntimeIdentityValidator(
-            executableValidator: PermissiveExecutableValidator()
+        let validator = InstalledRuntimeIdentityValidator()
+        let staleIdentity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
+        let runtime = InstalledRuntime(
+            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
+            architecture: .arm64,
+            executableURL: fixture.scriptURL,
+            executableIdentity: staleIdentity
         )
 
-        let runtimeWithoutIdentity = InstalledRuntime(
+        let replacement = fixture.directory.appendingPathComponent("replacement")
+        try Data("#!/bin/sh\nprintf 'new-content-and-inode\\n'\n".utf8).write(to: replacement)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
+        try FileManager.default.removeItem(at: fixture.scriptURL)
+        try FileManager.default.moveItem(at: replacement, to: fixture.scriptURL)
+
+        XCTAssertNotEqual(try inode(fixture.scriptURL), staleIdentity.inode)
+        XCTAssertNoThrow(try validator.validate(runtime))
+        XCTAssertNoThrow(try validator.validate(InstalledRuntime(
+            version: runtime.version,
+            architecture: runtime.architecture,
+            executableURL: runtime.executableURL
+        )))
+    }
+
+    func testDefaultProcessValidatorRejectsUnsafeCurrentFiles() throws {
+        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'unsafe\\n'\n")
+        defer { fixture.remove() }
+        let runtime = InstalledRuntime(
             version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
             architecture: .native,
             executableURL: fixture.scriptURL
         )
-        XCTAssertThrowsError(try validator.validate(runtimeWithoutIdentity)) { error in
-            XCTAssertEqual(
-                error as? RuntimeInstallerError,
-                .untrustedStoreItem("runtime executable identity is unavailable")
-            )
-        }
+        let validator = InstalledRuntimeIdentityValidator()
 
-        let identity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
-        let trustedRuntime = InstalledRuntime(
-            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
-            architecture: .native,
-            executableURL: fixture.scriptURL,
-            executableIdentity: identity
+        let symlink = fixture.directory.appendingPathComponent("forge3-symlink")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: fixture.scriptURL)
+        XCTAssertThrowsError(try validator.validate(InstalledRuntime(
+            version: runtime.version,
+            architecture: runtime.architecture,
+            executableURL: symlink
+        )))
+
+        let linkedDirectory = fixture.directory.appendingPathComponent("runtime-link")
+        let realDirectory = fixture.directory.appendingPathComponent("runtime-real")
+        try FileManager.default.createDirectory(at: realDirectory, withIntermediateDirectories: false)
+        let linkedExecutable = realDirectory.appendingPathComponent("forge3")
+        try Data("#!/bin/sh\nprintf 'linked\\n'\n".utf8).write(to: linkedExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: linkedExecutable.path)
+        try FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: realDirectory)
+        XCTAssertThrowsError(try validator.validate(InstalledRuntime(
+            version: runtime.version,
+            architecture: runtime.architecture,
+            executableURL: linkedDirectory.appendingPathComponent("forge3")
+        )))
+
+        let hardlink = fixture.directory.appendingPathComponent("forge3-hardlink")
+        try FileManager.default.linkItem(at: fixture.scriptURL, to: hardlink)
+        XCTAssertThrowsError(try validator.validate(runtime))
+        try FileManager.default.removeItem(at: hardlink)
+
+        XCTAssertThrowsError(
+            try InstalledRuntimeIdentityValidator(expectedUserID: geteuid() &+ 1).validate(runtime)
         )
-        XCTAssertNoThrow(try validator.validate(trustedRuntime))
 
-        let replacement = fixture.directory.appendingPathComponent("replacement")
-        try Data("#!/bin/sh\nprintf 'replacement\\n'\n".utf8).write(to: replacement)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: replacement.path)
-        try FileManager.default.removeItem(at: fixture.scriptURL)
-        try FileManager.default.moveItem(at: replacement, to: fixture.scriptURL)
-
-        XCTAssertThrowsError(try validator.validate(trustedRuntime))
+        for mode in [0o720, 0o702, 0o600] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: fixture.scriptURL.path)
+            XCTAssertThrowsError(try validator.validate(runtime), "mode \(String(mode, radix: 8))")
+        }
     }
 
     func testProcessHostConnectsChildStdinToEOF() async throws {
@@ -395,6 +424,14 @@ final class ProcessIntegrationTests: XCTestCase {
         }
         XCTFail("Timed out waiting for \(value) in \(url.path)")
     }
+}
+
+private func inode(_ url: URL) throws -> UInt64 {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard let value = attributes[.systemFileNumber] as? NSNumber else {
+        throw RuntimeInstallerError.processFailure("could not read runtime inode")
+    }
+    return value.uint64Value
 }
 
 private struct ProcessFixture {

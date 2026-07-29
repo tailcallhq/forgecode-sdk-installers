@@ -302,54 +302,88 @@ final class RuntimeInstallerTests: XCTestCase {
         ]), tarURL: tarURL, limits: limits))
     }
 
-    func testStoreUsesPrivatePermissionsTrustworthyReceiptAndAtomicCurrentPointer() throws {
+    func testStoreUsesPrivateModesAndReusesSafeSelfUpdatedRuntimeWithStaleReceiptMetadata() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
-        let validator = StubValidator()
-        let store = RuntimeStore(rootURL: directory.url.appendingPathComponent("runtime"), validator: validator)
-        let temporary = try store.makePrivateTemporaryDirectory()
-        let executable = temporary.appendingPathComponent("forge3")
-        try Data("one".utf8).write(to: executable)
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-        let receipt = RuntimeStoreReceipt(
-            version: version,
-            architecture: .arm64,
-            archiveSHA256: String(repeating: "a", count: 64),
-            executableSHA256: RuntimeSHA256.hexDigest(of: Data("one".utf8))
-        )
-        let installed = try store.installStagedRuntime(executableURL: executable, receipt: receipt, temporaryDirectory: temporary)
-        XCTAssertEqual(try store.current(architecture: .arm64), installed)
-        XCTAssertEqual(permissions(directory.url.appendingPathComponent("runtime")), 0o700)
-        XCTAssertEqual(permissions(installed.executableURL.deletingLastPathComponent()), 0o500)
-        XCTAssertEqual(permissions(installed.executableURL), 0o500)
-        XCTAssertEqual(permissions(installed.executableURL.deletingLastPathComponent().appendingPathComponent("receipt.json")), 0o400)
-        XCTAssertEqual(try String(contentsOf: directory.url.appendingPathComponent("runtime/current")), "1.2.3\n")
-
+        let validator = RecordingValidator()
+        let root = directory.url.appendingPathComponent("runtime")
+        let store = RuntimeStore(rootURL: root, validator: validator)
+        let installed = try installFixture(version: "1.2.3", data: Data("one".utf8), store: store)
         let installedDirectory = installed.executableURL.deletingLastPathComponent()
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installedDirectory.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installed.executableURL.path)
-        try Data("tampered".utf8).write(to: installed.executableURL)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installed.executableURL.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: installedDirectory.path)
-        XCTAssertNil(try store.cached(version: version, architecture: .arm64))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: installed.executableURL.deletingLastPathComponent().path))
+        let receiptURL = installedDirectory.appendingPathComponent("receipt.json")
+
+        XCTAssertEqual(try store.current(architecture: .arm64), installed)
+        XCTAssertEqual(permissions(root), 0o700)
+        XCTAssertEqual(permissions(installedDirectory), 0o700)
+        XCTAssertEqual(permissions(installed.executableURL), 0o700)
+        XCTAssertEqual(permissions(receiptURL), 0o600)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("current")), "1.2.3\n")
+
+        let originalInode = try inode(installed.executableURL)
+        let replacement = installedDirectory.appendingPathComponent("forge3.updated")
+        try Data("self-updated-content-with-different-size".utf8).write(to: replacement)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
+        try FileManager.default.removeItem(at: installed.executableURL)
+        try FileManager.default.moveItem(at: replacement, to: installed.executableURL)
+        let staleReceipt = RuntimeStoreReceipt(
+            version: RuntimeReleaseVersion(rawValue: "9.9.9")!,
+            architecture: .x86_64,
+            archiveSHA256: String(repeating: "0", count: 64),
+            executableSHA256: String(repeating: "f", count: 64)
+        )
+        try JSONEncoder().encode(staleReceipt).write(to: receiptURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: receiptURL.path)
+        let validationCountAfterInstall = validator.calls.count
+
+        let reused = try store.cached(version: installed.version, architecture: .arm64)
+
+        XCTAssertEqual(reused?.executableURL, installed.executableURL)
+        XCTAssertEqual(reused?.version, installed.version, "the managed path remains the candidate identity")
+        XCTAssertNotEqual(try inode(installed.executableURL), originalInode)
+        XCTAssertEqual(try Data(contentsOf: installed.executableURL), Data("self-updated-content-with-different-size".utf8))
+        XCTAssertEqual(validator.calls.count, validationCountAfterInstall, "cached lookup must not repeat Mach-O/signature validation")
     }
 
-    func testStoreRejectsInstalledRuntimeModeDriftAndSafelyUnsealsForRecovery() throws {
-        let directory = try TemporaryDirectory()
-        defer { directory.remove() }
-        let root = directory.url.appendingPathComponent("runtime")
-        let store = RuntimeStore(rootURL: root, validator: StubValidator())
-        let installed = try installFixture(version: "1.2.3", data: Data("sealed".utf8), store: store)
-        let runtimeDirectory = installed.executableURL.deletingLastPathComponent()
-        let receipt = runtimeDirectory.appendingPathComponent("receipt.json")
+    func testStoreRejectsUnsafeManagedExecutableTypesOwnershipLinksAndModes() throws {
+        enum Mutation {
+            case symlink, hardlink, wrongOwner, groupWritable, worldWritable, nonExecutable
+        }
+        for mutation in [Mutation.symlink, .hardlink, .wrongOwner, .groupWritable, .worldWritable, .nonExecutable] {
+            let directory = try TemporaryDirectory()
+            defer { directory.remove() }
+            let root = directory.url.appendingPathComponent("runtime")
+            let store = RuntimeStore(rootURL: root, validator: StubValidator())
+            let installed = try installFixture(version: "1.2.3", data: Data("managed".utf8), store: store)
+            let executable = installed.executableURL
+            var lookupStore = store
 
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runtimeDirectory.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installed.executableURL.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: receipt.path)
+            switch mutation {
+            case .symlink:
+                let outside = directory.url.appendingPathComponent("outside")
+                try Data("outside".utf8).write(to: outside)
+                try FileManager.default.removeItem(at: executable)
+                try FileManager.default.createSymbolicLink(at: executable, withDestinationURL: outside)
+            case .hardlink:
+                try FileManager.default.linkItem(at: executable, to: directory.url.appendingPathComponent("hardlink"))
+            case .wrongOwner:
+                lookupStore = RuntimeStore(
+                    rootURL: root,
+                    validator: StubValidator(),
+                    expectedUserID: geteuid() &+ 1
+                )
+            case .groupWritable:
+                try FileManager.default.setAttributes([.posixPermissions: 0o720], ofItemAtPath: executable.path)
+            case .worldWritable:
+                try FileManager.default.setAttributes([.posixPermissions: 0o702], ofItemAtPath: executable.path)
+            case .nonExecutable:
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: executable.path)
+            }
 
-        XCTAssertNil(try store.cached(version: installed.version, architecture: .arm64))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: runtimeDirectory.path))
+            XCTAssertNil(
+                try? lookupStore.cached(version: installed.version, architecture: .arm64),
+                "unsafe mutation \(mutation) must never be reusable"
+            )
+        }
     }
 
     func testStoreRejectsUnsafeManagedPathComponentsAndDoesNotFollowRuntimeLinks() throws {
@@ -401,30 +435,49 @@ final class RuntimeInstallerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: stalePointer.path))
     }
 
-    func testColdRestartInstallLatestRecoversReceiptBackedCacheWithExactlyZeroNetworkRequests() async throws {
+    func testColdRestartInstallLatestRecoversSelfUpdatedCacheWithExactlyZeroNetworkRequests() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let root = directory.url.appendingPathComponent("runtime", isDirectory: true)
         let originalStore = RuntimeStore(rootURL: root, validator: StubValidator())
         let installed = try installFixture(version: "1.2.4", data: Data("cached".utf8), store: originalStore)
+        let originalInode = try inode(installed.executableURL)
+        let replacement = installed.executableURL.deletingLastPathComponent().appendingPathComponent("forge3.updated")
+        try Data("self-updated-runtime-content".utf8).write(to: replacement)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
+        try FileManager.default.removeItem(at: installed.executableURL)
+        try FileManager.default.moveItem(at: replacement, to: installed.executableURL)
+        let receiptURL = installed.executableURL.deletingLastPathComponent().appendingPathComponent("receipt.json")
+        let staleReceipt = RuntimeStoreReceipt(
+            version: RuntimeReleaseVersion(rawValue: "0.0.1")!,
+            architecture: .x86_64,
+            archiveSHA256: String(repeating: "1", count: 64),
+            executableSHA256: String(repeating: "2", count: 64)
+        )
+        try JSONEncoder().encode(staleReceipt).write(to: receiptURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: receiptURL.path)
         try FileManager.default.removeItem(at: root.appendingPathComponent("current"))
 
         let network = MockNetwork(responses: [:])
+        let validator = RecordingValidator(error: .invalidMachO("must not validate recovered cache"))
         let restartedInstaller = RuntimeInstaller(
             architecture: .arm64,
             dependencies: .init(
                 network: network,
-                store: RuntimeStore(rootURL: root, validator: StubValidator()),
+                store: RuntimeStore(rootURL: root, validator: validator),
                 archive: MockArchive(),
-                validator: StubValidator()
+                validator: validator
             )
         )
 
         let recovered = try await restartedInstaller.installLatest()
         let requestedURLs = await network.requestedURLs
 
-        XCTAssertEqual(recovered, installed)
-        XCTAssertEqual(requestedURLs, [], "receipt-backed cold recovery must issue exactly zero RuntimeNetworkClient requests")
+        XCTAssertEqual(recovered.executableURL, installed.executableURL)
+        XCTAssertNotEqual(try inode(installed.executableURL), originalInode)
+        XCTAssertEqual(try Data(contentsOf: installed.executableURL), Data("self-updated-runtime-content".utf8))
+        XCTAssertEqual(validator.calls.count, 0)
+        XCTAssertEqual(requestedURLs, [], "self-updated cold recovery must issue exactly zero RuntimeNetworkClient requests")
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("current")), "1.2.4\n")
     }
 
