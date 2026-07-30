@@ -46,7 +46,7 @@ Unsigned artifacts are written to `dist/unsigned/`; signed/notarized release art
 
 The unsigned path ad-hoc signs the Mach-O executable and then the bundle, verifies that both signatures are specifically ad-hoc, and verifies the bundle seal. Ad-hoc signing supplies integrity metadata only: it carries no publisher identity, is not notarized, and does not make a downloaded app trustworthy. The signed path still replaces those signatures with the configured Developer ID identity before notarization.
 
-Verification uses exact allowlist inventories. The app may contain only its expected directories, executable, complete `Info.plist`, exact eight-byte `PkgInfo`, valid icon, and code-signature resource; it rejects symlinks, unexpected executable bits, unresolved placeholders, additional payloads, and any runtime-named path. The mounted DMG allows only that exact app, `/Applications`, its background, and Finder layout metadata. `manifest.txt` is atomically written with exact keys and compared to the app plist, artifacts, architectures, build flavor, and signature kinds. `SHA256SUMS` contains one strict lowercase SHA-256 entry for every regular file in the app plus the manifest and final DMG; missing, duplicate, extra, unsafe, malformed, or mismatched entries fail verification.
+Verification uses exact allowlist inventories. The app may contain only its expected directories, executable, complete `Info.plist`, exact eight-byte `PkgInfo`, valid icon, and code-signature resource; it rejects symlinks, unexpected executable bits, unresolved placeholders, additional payloads, and any runtime-named path. The mounted DMG allows only that exact app, `/Applications`, its background, its volume icon, and Finder layout metadata. `manifest.txt` is atomically written with exact keys and compared to the app plist, artifacts, architectures, build flavor, and signature kinds. `SHA256SUMS` contains one strict lowercase SHA-256 entry for every regular file in the app plus the manifest and final DMG; missing, duplicate, extra, unsafe, malformed, or mismatched entries fail verification.
 
 ## Install and use
 
@@ -57,7 +57,7 @@ The popover contains:
 - a tiny service header with the current service state and the **Open** button;
 - a scrollable body.
 
-The body shows the commands directly: Launch at Login and its approval path, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the header **Open** button.
+The body shows the commands directly: Launch at Login and its approval path, Open Logs, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the header **Open** button.
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
 
