@@ -8,16 +8,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         case inactive
     }
 
-    public struct ConversationRow: Equatable, Sendable {
-        public let id: String
-        public let title: String
-
-        public init(id: String, title: String) {
-            self.id = id
-            self.title = title
-        }
-    }
-
     public let serviceTitle: String
     public let serviceDetail: String
     public let serviceTone: ServiceTone
@@ -26,14 +16,6 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let versionLabel: String?
     public let endpointTooltip: String?
     public let canOpenFrontend: Bool
-    public let conversations: [ConversationRow]
-    /// Right-hand text of the collapsed "Conversations" disclosure row.
-    public let conversationsSummary: String
-    /// Whether the disclosure row can be expanded. There is nothing to show
-    /// when the service is off, so the row stays inert rather than opening an
-    /// empty list.
-    public let canExpandConversations: Bool
-    public let bodyMessage: String?
     public let refreshEnabled: Bool
     public enum InstallationProgress: Equatable, Sendable {
         case indeterminate(label: String)
@@ -45,33 +27,6 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let actionableError: String?
 
     public static func make(snapshot: ServiceSnapshot) -> PopoverPresentation {
-        let rows = isInactive(snapshot.phase) ? [] : snapshot.activeConversations.map {
-            ConversationRow(id: $0.id, title: $0.title)
-        }
-        let bodyMessage: String?
-        if rows.isEmpty {
-            switch snapshot.phase {
-            case .ready:
-                switch snapshot.conversationStreamState {
-                case .subscribed: bodyMessage = "No active conversations"
-                case .connecting, .reconnecting: bodyMessage = "Connecting…"
-                case .disconnected: bodyMessage = "Conversations unavailable"
-                }
-            case .installing(let phase):
-                bodyMessage = installationBodyMessage(phase)
-            case .installationFailed:
-                bodyMessage = "Runtime installation failed"
-            case .starting, .restarting:
-                bodyMessage = "Connecting…"
-            case .failed:
-                bodyMessage = "Conversations unavailable"
-            case .disabled, .stopped:
-                bodyMessage = "The ForgeCode service is not running"
-            }
-        } else {
-            bodyMessage = nil
-        }
-
         let phaseError: String?
         switch snapshot.phase {
         case .failed(let message): phaseError = message
@@ -88,14 +43,10 @@ public struct PopoverPresentation: Equatable, Sendable {
             versionLabel: versionLabel(snapshot: snapshot),
             endpointTooltip: endpointTooltip(snapshot),
             canOpenFrontend: canOpenFrontend(snapshot),
-            conversations: rows,
-            conversationsSummary: conversationsSummary(snapshot: snapshot, rows: rows),
-            canExpandConversations: !isInactive(snapshot.phase),
-            bodyMessage: bodyMessage,
             refreshEnabled: refreshEnabled(snapshot),
             retryInstallationEnabled: isInstallationFailure(snapshot.phase),
             installationProgress: installationProgress(snapshot.phase),
-            actionableError: phaseError ?? snapshot.streamError
+            actionableError: phaseError
         )
     }
 
@@ -104,17 +55,7 @@ public struct PopoverPresentation: Equatable, Sendable {
     ) -> (title: String, detail: String, tone: ServiceTone) {
         switch snapshot.phase {
         case .ready:
-            switch snapshot.conversationStreamState {
-            case .subscribed:
-                let count = snapshot.activeConversations.count
-                return ("ForgeCode", count == 1 ? "1 running" : "\(count) running", .normal)
-            case .connecting:
-                return ("ForgeCode", "Connecting", .active)
-            case .reconnecting:
-                return ("ForgeCode", "Reconnecting", .warning)
-            case .disconnected:
-                return ("ForgeCode", "Unavailable", .warning)
-            }
+            return ("ForgeCode", "Running", .normal)
         case .installing(let phase):
             return ("ForgeCode", installationDetail(phase), .active)
         case .installationFailed:
@@ -129,27 +70,6 @@ public struct PopoverPresentation: Equatable, Sendable {
             return ("ForgeCode", "Off", .inactive)
         case .stopped:
             return ("ForgeCode", "Stopped", .inactive)
-        }
-    }
-
-    private static func conversationsSummary(
-        snapshot: ServiceSnapshot,
-        rows: [ConversationRow]
-    ) -> String {
-        if isInactive(snapshot.phase) { return "Off" }
-        if !rows.isEmpty { return rows.count == 1 ? "1 running" : "\(rows.count) running" }
-        switch snapshot.phase {
-        case .ready:
-            switch snapshot.conversationStreamState {
-            case .subscribed: return "None running"
-            case .connecting, .reconnecting: return "Connecting…"
-            case .disconnected: return "Unavailable"
-            }
-        case .installing: return "Installing…"
-        case .installationFailed: return "Unavailable"
-        case .starting, .restarting: return "Connecting…"
-        case .failed: return "Unavailable"
-        case .disabled, .stopped: return "Off"
         }
     }
 
@@ -237,23 +157,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         case .verifying: return "Verifying runtime"
         case .installing: return "Installing runtime"
         case .ready: return "Runtime ready"
-        }
-    }
-
-    private static func installationBodyMessage(_ phase: RuntimeInstallationPhase) -> String {
-        switch phase {
-        case .resolving: return "Finding the ForgeCode runtime…"
-        case .downloading: return "Downloading the ForgeCode runtime…"
-        case .verifying: return "Verifying the downloaded runtime…"
-        case .installing: return "Installing the ForgeCode runtime…"
-        case .ready: return "Starting the ForgeCode service…"
-        }
-    }
-
-    private static func isInactive(_ phase: ServicePhase) -> Bool {
-        switch phase {
-        case .disabled, .stopped: return true
-        default: return false
         }
     }
 }
