@@ -11,9 +11,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         case unavailable(String)
     }
 
-    // Sized so the command list fits without scrolling; overflow scrolls
-    // within the same fixed frame.
-    static let contentSize = NSSize(width: 288, height: 280)
+    // Sized so the steady-state command list fits snugly without scrolling:
+    // header (56) + body (6 top inset + four 28pt rows + one 13pt group spacer
+    // + 4pt inter-row spacing + 8 bottom inset = 143) = 199, plus a small
+    // margin. Transient states with an extra row (login-item approval, error
+    // details) overflow into the scroll view within this same fixed frame.
+    static let contentSize = NSSize(width: 288, height: 204)
     private static let bodyContentWidth: CGFloat = 280
     /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 10
@@ -26,6 +29,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
     var onOpenLoginItems: (() -> Void)?
     var onRetryInstallation: (() -> Void)?
+    var onOpenLogs: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
     var onShowError: ((String) -> Void)?
     var onCheckForUpdates: (() -> Void)?
@@ -35,7 +39,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let contentController = PopoverContentViewController()
     private let statusTitle = NSTextField(labelWithString: "")
     private let statusDetail = NSTextField(labelWithString: "")
-    private let statusIcon = NSImageView()
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
     private let openFrontendButton = NSButton()
@@ -148,8 +151,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private func buildHeader() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        statusIcon.translatesAutoresizingMaskIntoConstraints = false
-        statusIcon.symbolConfiguration = .init(pointSize: 14, weight: .medium)
         statusTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         statusTitle.lineBreakMode = .byTruncatingTail
         statusTitle.maximumNumberOfLines = 1
@@ -173,16 +174,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         openFrontendButton.target = self
         openFrontendButton.action = #selector(openFrontendCommand)
         openFrontendButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(statusIcon)
         container.addSubview(titleStack)
         container.addSubview(statusDetail)
         container.addSubview(openFrontendButton)
         NSLayoutConstraint.activate([
-            statusIcon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset + 2),
-            statusIcon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            statusIcon.widthAnchor.constraint(equalToConstant: 16),
-            statusIcon.heightAnchor.constraint(equalToConstant: 16),
-            titleStack.leadingAnchor.constraint(equalTo: statusIcon.trailingAnchor, constant: 9),
+            titleStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset + 2),
             titleStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             titleStack.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
             statusDetail.leadingAnchor.constraint(greaterThanOrEqualTo: titleStack.trailingAnchor, constant: 6),
@@ -201,11 +197,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         presentation = PopoverPresentation.make(snapshot: snapshot)
         statusTitle.stringValue = presentation.serviceTitle
         statusDetail.stringValue = presentation.serviceDetail
-        statusIcon.image = NSImage(
-            systemSymbolName: statusSymbol(for: presentation.serviceTone),
-            accessibilityDescription: presentation.serviceTitle
-        )
-        statusIcon.contentTintColor = statusColor(for: presentation.serviceTone)
         openFrontendButton.isEnabled = presentation.canOpenFrontend
         openFrontendButton.toolTip = presentation.canOpenFrontend
             ? frontendTooltip
@@ -254,6 +245,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         } else if case .unavailable(let message) = loginItemState {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
+        bodyStack.addArrangedSubview(commandRow(
+            title: "Open Logs",
+            symbol: "doc.text",
+            action: #selector(openLogsCommand)
+        ))
         bodyStack.addArrangedSubview(commandRow(
             title: "Check for Updates",
             symbol: "arrow.down.circle",
@@ -495,6 +491,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
+    @objc private func openLogsCommand() { close(); onOpenLogs?() }
     @objc private func checkForUpdatesCommand() { close(); onCheckForUpdates?() }
     @objc private func openFrontendCommand() { close(); onOpenFrontend?() }
     @objc private func showErrorCommand() {
@@ -522,23 +519,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func statusSymbol(for tone: PopoverPresentation.ServiceTone) -> String {
-        switch tone {
-        case .normal: return "circle.fill"
-        case .active: return "arrow.triangle.2.circlepath"
-        case .warning: return "exclamationmark.triangle.fill"
-        case .inactive: return "pause.circle"
-        }
-    }
-
-    private func statusColor(for tone: PopoverPresentation.ServiceTone) -> NSColor {
-        switch tone {
-        case .normal: return .labelColor
-        case .active: return .controlAccentColor
-        case .warning: return .systemOrange
-        case .inactive: return .secondaryLabelColor
-        }
-    }
 }
 
 /// A full-width menu-style row: fixed icon column, generous gap to the label,
