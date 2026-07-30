@@ -34,7 +34,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let contentController = PopoverContentViewController()
     private let statusTitle = NSTextField(labelWithString: "")
-    private let statusVersion = NSTextField(labelWithString: "")
     private let statusDetail = NSTextField(labelWithString: "")
     private let statusIcon = NSImageView()
     private let scrollView = NSScrollView()
@@ -155,18 +154,13 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         statusTitle.lineBreakMode = .byTruncatingTail
         statusTitle.maximumNumberOfLines = 1
         statusTitle.translatesAutoresizingMaskIntoConstraints = false
-        statusVersion.font = .systemFont(ofSize: 10, weight: .regular)
-        statusVersion.textColor = .secondaryLabelColor
-        statusVersion.lineBreakMode = .byTruncatingTail
-        statusVersion.maximumNumberOfLines = 1
-        statusVersion.translatesAutoresizingMaskIntoConstraints = false
         statusDetail.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
         statusDetail.textColor = .secondaryLabelColor
         statusDetail.maximumNumberOfLines = 1
         statusDetail.lineBreakMode = .byTruncatingTail
         statusDetail.alignment = .right
         statusDetail.translatesAutoresizingMaskIntoConstraints = false
-        let titleStack = NSStackView(views: [statusTitle, statusVersion])
+        let titleStack = NSStackView(views: [statusTitle])
         titleStack.orientation = .vertical
         titleStack.alignment = .leading
         titleStack.spacing = 1
@@ -212,8 +206,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             accessibilityDescription: presentation.serviceTitle
         )
         statusIcon.contentTintColor = statusColor(for: presentation.serviceTone)
-        statusVersion.stringValue = presentation.versionLabel ?? ""
-        statusVersion.isHidden = presentation.versionLabel == nil
         openFrontendButton.isEnabled = presentation.canOpenFrontend
         openFrontendButton.toolTip = presentation.canOpenFrontend
             ? frontendTooltip

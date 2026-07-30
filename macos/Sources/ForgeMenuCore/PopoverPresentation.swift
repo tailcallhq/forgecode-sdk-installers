@@ -12,7 +12,6 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let serviceDetail: String
     public let serviceTone: ServiceTone
     public let endpointAddress: String?
-    public let versionLabel: String?
     public let canOpenFrontend: Bool
     public enum InstallationProgress: Equatable, Sendable {
         case indeterminate(label: String)
@@ -36,7 +35,6 @@ public struct PopoverPresentation: Equatable, Sendable {
             serviceDetail: header.detail,
             serviceTone: header.tone,
             endpointAddress: snapshot.endpoint?.webSocketURL.absoluteString,
-            versionLabel: versionLabel(snapshot: snapshot),
             canOpenFrontend: canOpenFrontend(snapshot),
             retryInstallationEnabled: isInstallationFailure(snapshot.phase),
             installationProgress: installationProgress(snapshot.phase),
@@ -65,17 +63,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         case .stopped:
             return ("ForgeCode", "Stopped", .inactive)
         }
-    }
-
-    /// The app and the bundled server version independently, since a release
-    /// of either can move without the other. The server line only appears once
-    /// the running helper has reported it.
-    private static func versionLabel(snapshot: ServiceSnapshot) -> String? {
-        guard let app = snapshot.appVersion else {
-            return snapshot.sdkVersion.map { "Server \($0)" }
-        }
-        guard let server = snapshot.sdkVersion else { return app }
-        return "\(app) · Server \(server)"
     }
 
     private static func canOpenFrontend(_ snapshot: ServiceSnapshot) -> Bool {

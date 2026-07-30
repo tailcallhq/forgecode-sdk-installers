@@ -16,51 +16,12 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertNil(presentation.actionableError)
     }
 
-    func testVersionLabelShowsAppAndServerIndependently() {
-        let both = PopoverPresentation.make(snapshot: ServiceSnapshot(
-            phase: .ready,
-            endpoint: LoopbackEndpoint(port: 9_755),
-            sdkVersion: "0.1.190",
-            appVersion: "1.0.0"
-        ))
-        XCTAssertEqual(both.versionLabel, "1.0.0 · Server 0.1.190")
-
-        // Before the helper reports in, the app version still stands alone.
-        let appOnly = PopoverPresentation.make(snapshot: ServiceSnapshot(
-            phase: .starting,
-            appVersion: "1.0.0"
-        ))
-        XCTAssertEqual(appOnly.versionLabel, "1.0.0")
-
-        let neither = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .stopped))
-        XCTAssertNil(neither.versionLabel)
-    }
-
     func testPreferredFrontendPortEnablesOpenAction() {
         let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(
             phase: .ready,
             endpoint: LoopbackEndpoint(port: SystemLoopbackEndpointAllocator.preferredPort)
         ))
         XCTAssertTrue(presentation.canOpenFrontend)
-    }
-
-    func testSDKVersionIsSurfacedInLabel() {
-        let withVersion = PopoverPresentation.make(snapshot: ServiceSnapshot(
-            phase: .ready,
-            endpoint: LoopbackEndpoint(port: 9_755),
-            sdkVersion: "0.1.0"
-        ))
-        // Labelled as the server's version, since the app has its own.
-        XCTAssertEqual(withVersion.versionLabel, "Server 0.1.0")
-
-        let withoutVersion = PopoverPresentation.make(snapshot: ServiceSnapshot(
-            phase: .ready,
-            endpoint: LoopbackEndpoint(port: 9_755)
-        ))
-        XCTAssertNil(withoutVersion.versionLabel)
-
-        let stopped = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .stopped))
-        XCTAssertNil(stopped.versionLabel)
     }
 
     func testStartingAndFailedStatesAreCompact() {
