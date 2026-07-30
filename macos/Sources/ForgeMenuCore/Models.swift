@@ -1,31 +1,5 @@
 import Foundation
 
-public struct ActiveConversation: Equatable, Sendable, Identifiable {
-    /// Shown until the SDK's title extension stores a generated title.
-    public static let placeholderTitle = "Untitled"
-
-    public let id: String
-    public let title: String
-
-    public init(id: String, title: String) {
-        self.id = id
-        self.title = title
-    }
-
-    public static func isPlaceholderTitle(_ title: String) -> Bool {
-        title.trimmingCharacters(in: .whitespacesAndNewlines) == placeholderTitle
-    }
-
-    public var hasPlaceholderTitle: Bool { Self.isPlaceholderTitle(title) }
-}
-
-public enum ConversationStreamState: Equatable, Sendable {
-    case disconnected
-    case connecting
-    case subscribed
-    case reconnecting(attempt: Int, delay: TimeInterval)
-}
-
 public enum RuntimeInstallationPhase: Equatable, Sendable {
     case resolving
     case downloading(progress: Double)
@@ -63,9 +37,6 @@ public struct ServiceSnapshot: Equatable, Sendable {
     public var revision: UInt64
     public var phase: ServicePhase
     public var endpoint: LoopbackEndpoint?
-    public var activeConversations: [ActiveConversation]
-    public var conversationStreamState: ConversationStreamState
-    public var streamError: String?
     /// SDK version reported by `rpc.discover` as `info.version`. Versioned
     /// independently of the app, so both are tracked separately.
     public var sdkVersion: String?
@@ -76,18 +47,12 @@ public struct ServiceSnapshot: Equatable, Sendable {
         revision: UInt64 = 0,
         phase: ServicePhase = .stopped,
         endpoint: LoopbackEndpoint? = nil,
-        activeConversations: [ActiveConversation] = [],
-        conversationStreamState: ConversationStreamState = .disconnected,
-        streamError: String? = nil,
         sdkVersion: String? = nil,
         appVersion: String? = nil
     ) {
         self.revision = revision
         self.phase = phase
         self.endpoint = endpoint
-        self.activeConversations = activeConversations
-        self.conversationStreamState = conversationStreamState
-        self.streamError = streamError
         self.sdkVersion = sdkVersion
         self.appVersion = appVersion
     }
@@ -114,7 +79,6 @@ public enum ForgeCoreError: LocalizedError, Equatable {
     case rpc(code: Int, message: String)
     case connection(String)
     case timeout(String)
-    case streamInterrupted(String)
     case invalidConsoleOrigin(String)
     case missingExecutable(String)
     case processAlreadyRunning
@@ -131,8 +95,6 @@ public enum ForgeCoreError: LocalizedError, Equatable {
             return "Cannot connect to the local ForgeCode service: \(message)"
         case .timeout(let operation):
             return "Timed out while \(operation)."
-        case .streamInterrupted(let message):
-            return "The active-conversation stream was interrupted: \(message)"
         case .invalidConsoleOrigin(let value):
             return "The ForgeCode console origin is invalid: \(value)"
         case .missingExecutable(let path):
