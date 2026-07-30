@@ -12,7 +12,6 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.serviceDetail, "Running")
         XCTAssertEqual(presentation.serviceTone, .normal)
         XCTAssertEqual(presentation.endpointAddress, "ws://127.0.0.1:50001")
-        XCTAssertEqual(presentation.endpointPortLabel, "Port 50001")
         XCTAssertTrue(presentation.canOpenFrontend)
         XCTAssertTrue(presentation.refreshEnabled)
         XCTAssertNil(presentation.actionableError)
@@ -26,10 +25,6 @@ final class PopoverPresentationTests: XCTestCase {
             appVersion: "1.0.0"
         ))
         XCTAssertEqual(both.versionLabel, "1.0.0 · Server 0.1.190")
-        XCTAssertEqual(
-            both.endpointTooltip,
-            "ws://127.0.0.1:9755\nForgeCode 1.0.0\nServer 0.1.190"
-        )
 
         // Before the helper reports in, the app version still stands alone.
         let appOnly = PopoverPresentation.make(snapshot: ServiceSnapshot(
@@ -47,11 +42,10 @@ final class PopoverPresentationTests: XCTestCase {
             phase: .ready,
             endpoint: LoopbackEndpoint(port: SystemLoopbackEndpointAllocator.preferredPort)
         ))
-        XCTAssertEqual(presentation.endpointPortLabel, "Port 9753")
         XCTAssertTrue(presentation.canOpenFrontend)
     }
 
-    func testSDKVersionIsSurfacedInLabelAndTooltip() {
+    func testSDKVersionIsSurfacedInLabel() {
         let withVersion = PopoverPresentation.make(snapshot: ServiceSnapshot(
             phase: .ready,
             endpoint: LoopbackEndpoint(port: 9_755),
@@ -59,18 +53,15 @@ final class PopoverPresentationTests: XCTestCase {
         ))
         // Labelled as the server's version, since the app has its own.
         XCTAssertEqual(withVersion.versionLabel, "Server 0.1.0")
-        XCTAssertEqual(withVersion.endpointTooltip, "ws://127.0.0.1:9755\nServer 0.1.0")
 
         let withoutVersion = PopoverPresentation.make(snapshot: ServiceSnapshot(
             phase: .ready,
             endpoint: LoopbackEndpoint(port: 9_755)
         ))
         XCTAssertNil(withoutVersion.versionLabel)
-        XCTAssertEqual(withoutVersion.endpointTooltip, "ws://127.0.0.1:9755")
 
         let stopped = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .stopped))
         XCTAssertNil(stopped.versionLabel)
-        XCTAssertNil(stopped.endpointTooltip)
     }
 
     func testStartingAndFailedStatesAreCompact() {
@@ -170,7 +161,6 @@ final class PopoverPresentationTests: XCTestCase {
             let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: phase))
             XCTAssertFalse(presentation.refreshEnabled)
             XCTAssertNil(presentation.endpointAddress)
-            XCTAssertNil(presentation.endpointPortLabel)
             XCTAssertFalse(presentation.canOpenFrontend)
         }
     }

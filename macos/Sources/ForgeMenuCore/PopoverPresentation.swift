@@ -12,9 +12,7 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let serviceDetail: String
     public let serviceTone: ServiceTone
     public let endpointAddress: String?
-    public let endpointPortLabel: String?
     public let versionLabel: String?
-    public let endpointTooltip: String?
     public let canOpenFrontend: Bool
     public let refreshEnabled: Bool
     public enum InstallationProgress: Equatable, Sendable {
@@ -39,9 +37,7 @@ public struct PopoverPresentation: Equatable, Sendable {
             serviceDetail: header.detail,
             serviceTone: header.tone,
             endpointAddress: snapshot.endpoint?.webSocketURL.absoluteString,
-            endpointPortLabel: snapshot.endpoint.map { "Port \($0.port)" },
             versionLabel: versionLabel(snapshot: snapshot),
-            endpointTooltip: endpointTooltip(snapshot),
             canOpenFrontend: canOpenFrontend(snapshot),
             refreshEnabled: refreshEnabled(snapshot),
             retryInstallationEnabled: isInstallationFailure(snapshot.phase),
@@ -82,15 +78,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         }
         guard let server = snapshot.sdkVersion else { return app }
         return "\(app) · Server \(server)"
-    }
-
-    private static func endpointTooltip(_ snapshot: ServiceSnapshot) -> String? {
-        guard let endpoint = snapshot.endpoint else { return nil }
-        let address = endpoint.webSocketURL.absoluteString
-        var lines = [address]
-        if let app = snapshot.appVersion { lines.append("ForgeCode \(app)") }
-        if let server = snapshot.sdkVersion { lines.append("Server \(server)") }
-        return lines.joined(separator: "\n")
     }
 
     private static func canOpenFrontend(_ snapshot: ServiceSnapshot) -> Bool {
