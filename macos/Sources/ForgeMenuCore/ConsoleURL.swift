@@ -40,24 +40,6 @@ public enum ConsoleURLBuilder {
         try buildURL(origin: origin, percentEncodedPath: "/", endpoint: endpoint)
     }
 
-    public static func conversationURL(
-        conversationID: String,
-        origin: URL,
-        endpoint: LoopbackEndpoint? = nil
-    ) throws -> URL {
-        guard !conversationID.isEmpty else {
-            throw ForgeCoreError.invalidResponse("conversation_id was empty")
-        }
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        guard let encodedID = conversationID.addingPercentEncoding(withAllowedCharacters: allowed),
-              !encodedID.isEmpty
-        else {
-            throw ForgeCoreError.invalidResponse("conversation_id could not be encoded")
-        }
-        return try buildURL(origin: origin, percentEncodedPath: "/c/\(encodedID)", endpoint: endpoint)
-    }
-
     private static func buildURL(
         origin: URL,
         percentEncodedPath: String,

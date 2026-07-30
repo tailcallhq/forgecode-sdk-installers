@@ -1,8 +1,9 @@
 import Foundation
 
 public protocol ForgeRPCClientProtocol: Sendable {
-    func activeRootConversationStream() async -> AsyncThrowingStream<[ActiveConversation], Error>
-    func activeRootConversations() async throws -> [ActiveConversation]
+    /// Reads the SDK version via `rpc.discover`. Also serves as the service
+    /// readiness and health probe: a successful round trip proves the local
+    /// WebSocket service is up and answering RPCs.
     func sdkVersion() async throws -> String
 }
 
@@ -20,82 +21,6 @@ public actor WebSocketRPCClient: ForgeRPCClientProtocol {
         self.endpoint = endpoint
         self.timeout = timeout
         self.session = session
-    }
-
-    public func activeRootConversationStream() -> AsyncThrowingStream<[ActiveConversation], Error> {
-        let request = ForgeRPCParser.makeConversationListStreamRequest(
-            id: makeID(prefix: "conversation-list-stream")
-        )
-        let endpoint = self.endpoint
-        let timeout = self.timeout
-        let session = self.session
-
-        return AsyncThrowingStream { continuation in
-            let producer = Task {
-                let socket = session.webSocketTask(with: endpoint)
-                socket.resume()
-                defer { socket.cancel(with: .normalClosure, reason: nil) }
-                do {
-                    let encoded = try JSONEncoder().encode(request)
-                    try await Self.withTimeout(
-                        seconds: timeout,
-                        operation: "sending the active-conversation subscription",
-                        onCancel: { socket.cancel(with: .goingAway, reason: nil) }
-                    ) {
-                        try await socket.send(.data(encoded))
-                    }
-
-                    let pointerData = try await Self.receiveData(
-                        from: socket,
-                        timeout: timeout,
-                        operation: "waiting for the active-conversation stream pointer"
-                    )
-                    _ = try ForgeRPCParser.parseStreamPointer(
-                        from: pointerData,
-                        expectedID: request.id,
-                        expectedMethod: request.method
-                    )
-
-                    var previousSequence: UInt64?
-                    while !Task.isCancelled {
-                        let data = try await Self.receiveData(
-                            from: socket,
-                            timeout: 86_400,
-                            operation: "waiting for an active-conversation stream frame"
-                        )
-                        guard let frame = try ForgeRPCParser.parseStreamFrame(
-                            from: data,
-                            expectedRequestID: request.id,
-                            expectedMethod: request.method
-                        ) else { continue }
-                        try ForgeRPCParser.validateNextSequence(frame.sequence, after: previousSequence)
-                        previousSequence = frame.sequence
-                        switch frame {
-                        case .snapshot(_, let conversations):
-                            continuation.yield(conversations)
-                        case .error(_, let code, let message):
-                            throw ForgeCoreError.rpc(code: code, message: message)
-                        case .complete:
-                            throw ForgeCoreError.streamInterrupted("the server completed the subscription")
-                        }
-                    }
-                    throw CancellationError()
-                } catch is CancellationError {
-                    continuation.finish(throwing: CancellationError())
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { @Sendable _ in producer.cancel() }
-        }
-    }
-
-    public func activeRootConversations() async throws -> [ActiveConversation] {
-        let request = ForgeRPCParser.makeConversationListRequest(
-            id: makeID(prefix: "conversation-list")
-        )
-        let data = try await performOneShot(request)
-        return try ForgeRPCParser.parseConversationList(from: data, expectedID: request.id)
     }
 
     public func sdkVersion() async throws -> String {
