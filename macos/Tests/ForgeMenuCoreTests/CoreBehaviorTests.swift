@@ -37,36 +37,12 @@ final class CoreBehaviorTests: XCTestCase {
         XCTAssertThrowsError(try ConsoleURLBuilder.validateOrigin("https://user@example.com"))
     }
 
-    func testConversationURLPercentEncodesIDWithoutOriginLeakage() throws {
-        let origin = try ConsoleURLBuilder.validateOrigin("http://127.0.0.1:5173")
-        let url = try ConsoleURLBuilder.conversationURL(
-            conversationID: "root/a?next=#fragment ü",
-            origin: origin
-        )
-        XCTAssertEqual(url.scheme, "http")
-        XCTAssertEqual(url.host, "127.0.0.1")
-        XCTAssertEqual(url.port, 5173)
-        XCTAssertEqual(url.query, nil)
-        XCTAssertEqual(url.fragment, nil)
-        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath, "/c/root%2Fa%3Fnext%3D%23fragment%20%C3%BC")
-    }
-
-    func testConsoleAndConversationURLsCarryConnectEndpoint() throws {
+    func testConsoleURLCarriesConnectEndpoint() throws {
         let origin = try ConsoleURLBuilder.validateOrigin("https://console.forgecode.dev")
         let endpoint = LoopbackEndpoint(port: 9_755)
 
         let console = try ConsoleURLBuilder.consoleURL(origin: origin, endpoint: endpoint)
         XCTAssertEqual(console.absoluteString, "https://console.forgecode.dev/?connect=127.0.0.1:9755")
-
-        let conversation = try ConsoleURLBuilder.conversationURL(
-            conversationID: "abc-123",
-            origin: origin,
-            endpoint: endpoint
-        )
-        XCTAssertEqual(
-            conversation.absoluteString,
-            "https://console.forgecode.dev/c/abc-123?connect=127.0.0.1:9755"
-        )
 
         let withoutEndpoint = try ConsoleURLBuilder.consoleURL(origin: origin, endpoint: nil)
         XCTAssertNil(withoutEndpoint.query)

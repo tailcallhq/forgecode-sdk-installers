@@ -17,13 +17,40 @@ func savePNG(_ image: NSImage, to url: URL) throws {
     try data.write(to: url, options: .atomic)
 }
 
+// Load the brand mark from a committed hi-res raster (1024x1024 PNG) rather
+// than rasterizing the SVG at build time. AppKit's private `_NSSVGImageRep`
+// intermittently rasterizes to a fully transparent image on cold process
+// starts, which shipped a blank/generic-glyph icon in the DMG. A pre-rendered
+// PNG decodes deterministically, and `assertOpaqueCoverage` below fails the
+// build if the mark ever comes through empty again.
 func loadLogo() -> NSImage {
     let scriptURL = URL(fileURLWithPath: #filePath)
-    let logoURL = scriptURL.deletingLastPathComponent().appendingPathComponent("forgecode-logo-mark.svg")
+    let logoURL = scriptURL.deletingLastPathComponent().appendingPathComponent("forgecode-logo-mark.png")
     guard let logo = NSImage(contentsOf: logoURL) else {
         fatalError("could not load ForgeCode logo at \(logoURL.path)")
     }
     return logo
+}
+
+// Guard against a silently empty rasterization: sample the bitmap and require
+// a minimum number of non-transparent pixels, otherwise abort the build.
+func assertOpaqueCoverage(_ image: NSImage, label: String) {
+    guard let tiff = image.tiffRepresentation,
+          let bitmap = NSBitmapImageRep(data: tiff) else {
+        fatalError("\(label): could not read rendered bitmap")
+    }
+    var opaqueSamples = 0
+    let step = max(1, min(bitmap.pixelsWide, bitmap.pixelsHigh) / 64)
+    for x in stride(from: 0, to: bitmap.pixelsWide, by: step) {
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: step) {
+            if let color = bitmap.colorAt(x: x, y: y), color.alphaComponent > 0.01 {
+                opaqueSamples += 1
+            }
+        }
+    }
+    guard opaqueSamples >= 32 else {
+        fatalError("\(label): rendered image is blank (opaqueSamples=\(opaqueSamples))")
+    }
 }
 
 func icon(size: CGFloat) -> NSImage {
@@ -125,23 +152,6 @@ func drawBackground(width: CGFloat, height: CGFloat) {
     rgb(0x000000, alpha: 0.02).setStroke()
     stripe.stroke()
 
-    // Brand header, top-left: logo mark + wordmark (JetBrains Toolbox style).
-    let markSize: CGFloat = 30
-    let markRect = NSRect(x: 30, y: height - 30 - markSize, width: markSize, height: markSize)
-    loadLogo().draw(in: markRect, from: .zero, operation: .sourceOver, fraction: 1)
-    let wordmark = NSAttributedString(
-        string: "ForgeCode",
-        attributes: [
-            .font: NSFont.systemFont(ofSize: 19, weight: .bold),
-            .foregroundColor: colorTextPrimary,
-        ]
-    )
-    let wordmarkSize = wordmark.size()
-    wordmark.draw(at: NSPoint(
-        x: markRect.maxX + 10,
-        y: markRect.midY - wordmarkSize.height / 2
-    ))
-
     // Center row: a neural net links the two icons — a single input
     // neuron fed by the ForgeCode icon fans out through widening,
     // fully-connected layers (1 -> 3 -> 5 -> 6 -> 7), and the output layer
@@ -231,7 +241,9 @@ func drawBackground(width: CGFloat, height: CGFloat) {
     ))
 }
 
-try savePNG(icon(size: 1024), to: URL(fileURLWithPath: arguments[1]))
+let iconImage = icon(size: 1024)
+assertOpaqueCoverage(iconImage, label: "app icon")
+try savePNG(iconImage, to: URL(fileURLWithPath: arguments[1]))
 let backgroundData = try renderRetinaPNG(width: 660, height: 440) {
     drawBackground(width: 660, height: 440)
 }

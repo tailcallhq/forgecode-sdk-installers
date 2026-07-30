@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
             popoverController = PopoverController()
-            wireActions(paths: paths)
+            wireActions()
             serviceController.onSnapshotChanged = { [weak self] snapshot in
                 guard let self else { return }
                 self.popoverController.update(snapshot: snapshot, loginItemState: self.loginItemState)
@@ -99,27 +99,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    private func wireActions(paths: RuntimePaths) {
+    private func wireActions() {
         popoverController.onWillShow = { [weak self] in self?.synchronizeLoginPreference() }
         popoverController.onLaunchAtLoginChanged = { [weak self] enabled in
             self?.setLaunchAtLogin(enabled)
         }
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
-        popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
         popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
-        popoverController.onOpenLogs = { [weak self] in
-            do {
-                try FileManager.default.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(paths.logsDirectory)
-            } catch {
-                self?.presentActionError(title: "Logs could not be opened", error: error)
-            }
-        }
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()
-        }
-        popoverController.onOpenConversation = { [weak self] conversationID in
-            self?.openConversation(conversationID)
         }
         popoverController.onShowError = { [weak self] message in
             let error = NSError(domain: "ForgeMenuBar", code: 2, userInfo: [
@@ -147,29 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func openConversation(_ conversationID: String) {
-        do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin()
-            let url = try ConsoleURLBuilder.conversationURL(
-                conversationID: conversationID,
-                origin: origin,
-                endpoint: serviceController.snapshot.endpoint
-            )
-            guard NSWorkspace.shared.open(url) else {
-                throw ForgeCoreError.connection("The default browser did not accept the ForgeCode console URL.")
-            }
-        } catch {
-            logger.error("Could not open conversation: \(error.localizedDescription)")
-            presentActionError(title: "Conversation could not be opened", error: error)
-        }
-    }
-
     private func installApplicationMainMenu() {
         let mainMenu = NSMenu(title: "Main Menu")
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
         let checkForUpdates = NSMenuItem(
-            title: "Check for Updates…",
+            title: "Check for Updates",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
@@ -177,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(checkForUpdates)
         appMenu.addItem(.separator())
         let quit = NSMenuItem(
-            title: "Quit ForgeCode",
+            title: "Quit",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )

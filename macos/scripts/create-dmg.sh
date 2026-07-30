@@ -7,7 +7,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 require_command hdiutil
 require_command osascript
 require_command ditto
-require_command xattr
+require_command SetFile
 
 [ -d "$APP_BUNDLE" ] || fail "app bundle is missing; run scripts/assemble-app.sh"
 verify_app_inventory "$APP_BUNDLE"
@@ -77,21 +77,31 @@ actual_mount=$(attach_plist_value "$attach_plist" mount-point)
 osascript "$PROJECT_ROOT/packaging/dmg-layout.applescript" "$mount_dir"
 # Install the volume icon only after the Finder layout pass: Finder's `update`
 # command re-syncs the volume root and deletes any .VolumeIcon.icns it did not
-# create, so installing it earlier silently loses the file. Then mark the volume
-# root with kHasCustomIcon (0x0400 at byte offset 8 of FinderInfo) so Finder
-# shows the icon for the mounted disk.
+# create, so installing it earlier silently loses the file. The icns creator
+# code and the volume's custom-icon flag are then set below, in that order.
 install -m 0644 "$assets_dir/AppIcon.icns" "$mount_dir/.VolumeIcon.icns"
-xattr -wx com.apple.FinderInfo \
-  "0000000000000000040000000000000000000000000000000000000000000000" \
-  "$mount_dir"
-# Park the late-installed volume icon outside the visible window area and set
-# the BSD hidden flag on both support files so they never appear in the
-# drag-and-drop layout, even when Finder shows hidden files. No Finder `update`
-# here: that command deletes .VolumeIcon.icns.
+# Tag the icon file with the `icnC` creator code. Without it, Finder's icon
+# cache does not recognize .VolumeIcon.icns as the custom volume icon on the
+# FIRST mount — the disk showed the generic volume glyph until a later mount
+# refreshed the cache. This mirrors the canonical create-dmg recipe.
+SetFile -c icnC "$mount_dir/.VolumeIcon.icns"
+# Park the icon outside the visible window area and hide the support files so
+# they never appear in the drag-and-drop layout, even when Finder shows hidden
+# files. This Finder reposition is the LAST operation that touches the volume
+# root, so it must run BEFORE the volume's custom-icon flag is set below —
+# otherwise Finder re-syncs the root and drops the flag, which is exactly why
+# the icon only appeared on the second mount.
 osascript -e 'on run argv
     tell application "Finder" to set position of item ".VolumeIcon.icns" of folder (POSIX file (item 1 of argv) as alias) to {900, 270}
 end run' "$mount_dir"
 chflags hidden "$mount_dir/background.png" "$mount_dir/.VolumeIcon.icns"
+# Set the volume's kHasCustomIcon flag LAST — after every Finder/AppleScript
+# operation — so nothing can clear it before the image is frozen. Use
+# `SetFile -a C` (the canonical create-dmg call) rather than writing the raw
+# FinderInfo xattr: SetFile goes through the same attribute API Finder uses, so
+# the flag is recognized on the very first mount instead of only after a later
+# mount warms Finder's icon cache.
+SetFile -a C "$mount_dir"
 # HFS+ may create filesystem-event bookkeeping while mounted. It is not part of
 # the release payload, so remove it before freezing and verifying the allowlist.
 if [ -d "$mount_dir/.fseventsd" ]; then
