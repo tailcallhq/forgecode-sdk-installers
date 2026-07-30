@@ -16,7 +16,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     // within the same fixed frame.
     static let contentSize = NSSize(width: 288, height: 280)
     private static let bodyContentWidth: CGFloat = 280
-    /// Horizontal inset shared by rows, separators and notes.
+    /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 10
     /// Left edge of the label column, so notes line up under row titles.
     private static let labelColumnInset = rowInset
@@ -106,8 +106,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
         let header = buildHeader()
         let footer = buildFooter()
-        let topSeparator = separator()
-        let bottomSeparator = separator()
 
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
@@ -129,9 +127,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         scrollView.documentView = document
 
         root.addSubview(header)
-        root.addSubview(topSeparator)
         root.addSubview(scrollView)
-        root.addSubview(bottomSeparator)
         root.addSubview(footer)
 
         NSLayoutConstraint.activate([
@@ -141,13 +137,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             header.heightAnchor.constraint(equalToConstant: 56),
-            topSeparator.topAnchor.constraint(equalTo: header.bottomAnchor),
-            topSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            topSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: topSeparator.bottomAnchor),
+            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomSeparator.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor),
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
@@ -158,9 +151,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             bodyStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
             bodyStack.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
-            bottomSeparator.bottomAnchor.constraint(equalTo: footer.topAnchor),
-            bottomSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            bottomSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -295,7 +285,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private func buildCommandBody() {
         if let progress = presentation.installationProgress {
             bodyStack.addArrangedSubview(installationProgressView(progress))
-            bodyStack.addArrangedSubview(bodySeparator())
+            bodyStack.addArrangedSubview(groupSpacer())
         } else if presentation.retryInstallationEnabled {
             bodyStack.addArrangedSubview(noteView(presentation.actionableError ?? "Runtime installation failed."))
             bodyStack.addArrangedSubview(commandRow(
@@ -304,11 +294,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
                 action: #selector(retryInstallationCommand),
                 isProminent: true
             ))
-            bodyStack.addArrangedSubview(bodySeparator())
+            bodyStack.addArrangedSubview(groupSpacer())
         }
 
         bodyStack.addArrangedSubview(conversationsDisclosureRow())
-        bodyStack.addArrangedSubview(bodySeparator())
+        bodyStack.addArrangedSubview(groupSpacer())
 
         bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
@@ -344,7 +334,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
                 action: #selector(showErrorCommand)
             ))
         }
-        bodyStack.addArrangedSubview(bodySeparator())
+        bodyStack.addArrangedSubview(groupSpacer())
         bodyStack.addArrangedSubview(commandRow(
             title: "Quit ForgeCode",
             symbol: "power",
@@ -362,7 +352,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             trailingText: presentation.conversationsSummary,
             isProminent: true
         ))
-        bodyStack.addArrangedSubview(bodySeparator())
+        bodyStack.addArrangedSubview(groupSpacer())
         if let message = presentation.bodyMessage {
             bodyStack.addArrangedSubview(noteView(message, centered: true))
         }
@@ -459,21 +449,14 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return row
     }
 
-    /// Group separator: an inset hairline with equal space above and below, so
-    /// groups read as groups rather than rows crowded against a line.
-    private func bodySeparator() -> NSView {
+    /// Group spacer: empty vertical breathing room between command groups, so
+    /// groups still read as groups without drawing a hairline.
+    private func groupSpacer() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        let box = NSBox()
-        box.boxType = .separator
-        box.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(box)
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
-            container.heightAnchor.constraint(equalToConstant: 13),
-            box.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset),
-            box.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.rowInset),
-            box.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            container.heightAnchor.constraint(equalToConstant: 13)
         ])
         return container
     }
@@ -519,13 +502,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         row.setAccessibilityLabel(conversation.title)
         row.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth).isActive = true
         return row
-    }
-
-    private func separator() -> NSBox {
-        let box = NSBox()
-        box.boxType = .separator
-        box.translatesAutoresizingMaskIntoConstraints = false
-        return box
     }
 
     private func applyVisibilityEvent(_ event: PopoverVisibilityEvent, relativeTo button: NSStatusBarButton? = nil) {
