@@ -47,7 +47,7 @@ final class RPCParserTests: XCTestCase {
     }
 
     func testIncompleteResponseIsRejected() {
-        let data = Data(#"{"jsonrpc":"2.0","id":"d","result":{"data":{"stream":{"method":"x","request_id":"d"}}}}"#.utf8)
+        let data = Data(#"{"jsonrpc":"2.0","id":"d","result":{"data":{}}}"#.utf8)
         XCTAssertThrowsError(try ForgeRPCParser.parseSDKVersion(from: data, expectedID: "d"))
     }
 }

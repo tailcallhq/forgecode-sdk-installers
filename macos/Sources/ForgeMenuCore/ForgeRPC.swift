@@ -63,7 +63,6 @@ private struct RPCResult: Decodable {
 
 private struct RPCData: Decodable {
     let complete: JSONValue?
-    let stream: JSONValue?
 }
 
 private struct RPCErrorPayload: Decodable {

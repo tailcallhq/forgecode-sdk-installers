@@ -46,7 +46,7 @@ public actor ServiceSupervisor {
     private var terminating = false
     private var restartAttempt = 0
     private var generation: UInt64 = 0
-    private var subscriptionGeneration: UInt64 = 0
+    private var probeGeneration: UInt64 = 0
     private var probeTask: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
     private var readinessWatchdogTask: Task<Void, Never>?
@@ -152,11 +152,11 @@ public actor ServiceSupervisor {
     /// re-reads the reported SDK version. Independent of lifecycle commands.
     public func refreshNow() {
         guard desiredEnabled, !terminating, let client else { return }
-        subscriptionGeneration &+= 1
+        probeGeneration &+= 1
         startHealthProbe(
             client: client,
             processGeneration: generation,
-            subscriptionGeneration: subscriptionGeneration,
+            probeGeneration: probeGeneration,
             initialReadiness: !isReady(snapshot.phase)
         )
     }
@@ -180,7 +180,7 @@ public actor ServiceSupervisor {
         installTask?.cancel()
         cancelInstallationProgress()
         generation &+= 1
-        subscriptionGeneration &+= 1
+        probeGeneration &+= 1
         clearServiceIdentity()
         snapshot.endpoint = nil
         snapshot.phase = .installing(.resolving)
@@ -188,7 +188,7 @@ public actor ServiceSupervisor {
         lastInstallationProgressPublishedAt = now()
 
         let processGeneration = generation
-        let currentSubscriptionGeneration = subscriptionGeneration
+        let currentProbeGeneration = probeGeneration
         installTask = Task { [weak self, runtimeInstaller] in
             do {
                 let runtime: InstalledRuntime
@@ -204,13 +204,13 @@ public actor ServiceSupervisor {
                 await self?.runtimePreparationCompleted(
                     .success(runtime),
                     generation: processGeneration,
-                    subscriptionGeneration: currentSubscriptionGeneration
+                    probeGeneration: currentProbeGeneration
                 )
             } catch {
                 await self?.runtimePreparationCompleted(
                     .failure(error),
                     generation: processGeneration,
-                    subscriptionGeneration: currentSubscriptionGeneration
+                    probeGeneration: currentProbeGeneration
                 )
             }
         }
@@ -219,7 +219,7 @@ public actor ServiceSupervisor {
     private func runtimePreparationCompleted(
         _ result: Result<InstalledRuntime, Error>,
         generation expectedGeneration: UInt64,
-        subscriptionGeneration expectedSubscriptionGeneration: UInt64
+        probeGeneration expectedProbeGeneration: UInt64
     ) async {
         guard lifecycleIsCurrent(expectedGeneration) else { return }
         installTask = nil
@@ -227,12 +227,12 @@ public actor ServiceSupervisor {
         case .success(let runtime):
             await enqueueLifecycle { supervisor in
                 guard supervisor.lifecycleIsCurrent(expectedGeneration),
-                      expectedSubscriptionGeneration == supervisor.subscriptionGeneration
+                      expectedProbeGeneration == supervisor.probeGeneration
                 else { return }
                 await supervisor.spawnLocked(
                     runtime: runtime,
                     generation: expectedGeneration,
-                    subscriptionGeneration: expectedSubscriptionGeneration
+                    probeGeneration: expectedProbeGeneration
                 )
             }
         case .failure(let error):
@@ -247,15 +247,15 @@ public actor ServiceSupervisor {
     private func spawnLocked(
         runtime: InstalledRuntime,
         generation expectedGeneration: UInt64,
-        subscriptionGeneration expectedSubscriptionGeneration: UInt64
+        probeGeneration expectedProbeGeneration: UInt64
     ) async {
         guard lifecycleIsCurrent(expectedGeneration),
-              expectedSubscriptionGeneration == subscriptionGeneration
+              expectedProbeGeneration == probeGeneration
         else { return }
         do {
             let endpoint = try endpointAllocator.allocate()
             guard lifecycleIsCurrent(expectedGeneration),
-                  expectedSubscriptionGeneration == subscriptionGeneration
+                  expectedProbeGeneration == probeGeneration
             else { return }
             let newClient = clientFactory(endpoint)
             client = newClient
@@ -264,7 +264,7 @@ public actor ServiceSupervisor {
             publishSnapshot()
 
             guard lifecycleIsCurrent(expectedGeneration),
-                  expectedSubscriptionGeneration == subscriptionGeneration
+                  expectedProbeGeneration == probeGeneration
             else { return }
             try await processHost.start(
                 runtime: runtime,
@@ -272,7 +272,7 @@ public actor ServiceSupervisor {
                 generation: expectedGeneration
             )
             guard lifecycleIsCurrent(expectedGeneration),
-                  expectedSubscriptionGeneration == subscriptionGeneration
+                  expectedProbeGeneration == probeGeneration
             else {
                 await processHost.stop(gracePeriod: configuration.terminationGracePeriod)
                 return
@@ -280,7 +280,7 @@ public actor ServiceSupervisor {
             startHealthProbe(
                 client: newClient,
                 processGeneration: expectedGeneration,
-                subscriptionGeneration: expectedSubscriptionGeneration,
+                probeGeneration: expectedProbeGeneration,
                 initialReadiness: true
             )
         } catch is CancellationError {
@@ -299,7 +299,7 @@ public actor ServiceSupervisor {
         cancelBackgroundTasks()
         cancelInstallationProgress()
         generation &+= 1
-        subscriptionGeneration &+= 1
+        probeGeneration &+= 1
         await processHost.stop(gracePeriod: configuration.terminationGracePeriod)
         client = nil
         snapshot.endpoint = nil
@@ -387,7 +387,7 @@ public actor ServiceSupervisor {
 
     private func cancelInstallForSupersedingLifecycle() {
         generation &+= 1
-        subscriptionGeneration &+= 1
+        probeGeneration &+= 1
         installTask?.cancel()
         installTask = nil
         cancelInstallationProgress()
@@ -405,7 +405,7 @@ public actor ServiceSupervisor {
     private func startHealthProbe(
         client: ForgeRPCClientProtocol,
         processGeneration: UInt64,
-        subscriptionGeneration: UInt64,
+        probeGeneration: UInt64,
         initialReadiness: Bool
     ) {
         probeTask?.cancel()
@@ -416,7 +416,7 @@ public actor ServiceSupervisor {
                 do { try await self.sleep(self.configuration.readinessTimeout) } catch { return }
                 await self.initialReadinessTimedOut(
                     processGeneration: processGeneration,
-                    subscriptionGeneration: subscriptionGeneration
+                    probeGeneration: probeGeneration
                 )
             }
         } else {
@@ -427,7 +427,7 @@ public actor ServiceSupervisor {
             await self.runHealthProbe(
                 client: client,
                 processGeneration: processGeneration,
-                subscriptionGeneration: subscriptionGeneration,
+                probeGeneration: probeGeneration,
                 initialReadiness: initialReadiness
             )
         }
@@ -440,20 +440,20 @@ public actor ServiceSupervisor {
     private func runHealthProbe(
         client: ForgeRPCClientProtocol,
         processGeneration expectedProcessGeneration: UInt64,
-        subscriptionGeneration expectedSubscriptionGeneration: UInt64,
+        probeGeneration expectedProbeGeneration: UInt64,
         initialReadiness: Bool
     ) async {
         let readinessDeadline = now().addingTimeInterval(configuration.readinessTimeout)
 
-        while subscriptionIsCurrent(
+        while probeIsCurrent(
             processGeneration: expectedProcessGeneration,
-            subscriptionGeneration: expectedSubscriptionGeneration
+            probeGeneration: expectedProbeGeneration
         ) {
             do {
                 let raw = try await client.sdkVersion()
-                guard subscriptionIsCurrent(
+                guard probeIsCurrent(
                     processGeneration: expectedProcessGeneration,
-                    subscriptionGeneration: expectedSubscriptionGeneration
+                    probeGeneration: expectedProbeGeneration
                 ) else { return }
                 readinessWatchdogTask?.cancel()
                 readinessWatchdogTask = nil
@@ -467,9 +467,9 @@ public actor ServiceSupervisor {
             } catch is CancellationError {
                 return
             } catch {
-                guard subscriptionIsCurrent(
+                guard probeIsCurrent(
                     processGeneration: expectedProcessGeneration,
-                    subscriptionGeneration: expectedSubscriptionGeneration
+                    probeGeneration: expectedProbeGeneration
                 ) else { return }
 
                 let message = error.localizedDescription
@@ -491,12 +491,12 @@ public actor ServiceSupervisor {
 
     private func initialReadinessTimedOut(
         processGeneration expectedProcessGeneration: UInt64,
-        subscriptionGeneration expectedSubscriptionGeneration: UInt64
+        probeGeneration expectedProbeGeneration: UInt64
     ) async {
         readinessWatchdogTask = nil
-        guard subscriptionIsCurrent(
+        guard probeIsCurrent(
             processGeneration: expectedProcessGeneration,
-            subscriptionGeneration: expectedSubscriptionGeneration
+            probeGeneration: expectedProbeGeneration
         ), !isReady(snapshot.phase) else { return }
 
         let message = "Timed out waiting for the ForgeCode service to become ready."
@@ -514,7 +514,7 @@ public actor ServiceSupervisor {
             else { return }
             supervisor.cancelBackgroundTasks()
             supervisor.generation &+= 1
-            supervisor.subscriptionGeneration &+= 1
+            supervisor.probeGeneration &+= 1
             await supervisor.processHost.stop(
                 gracePeriod: supervisor.configuration.terminationGracePeriod
             )
@@ -532,7 +532,7 @@ public actor ServiceSupervisor {
             else { return }
             supervisor.cancelBackgroundTasks()
             supervisor.generation &+= 1
-            supervisor.subscriptionGeneration &+= 1
+            supervisor.probeGeneration &+= 1
             supervisor.client = nil
             supervisor.snapshot.endpoint = nil
             supervisor.snapshot.phase = .failed("forge3 exited unexpectedly with status \(status).")
@@ -605,15 +605,15 @@ public actor ServiceSupervisor {
         }
     }
 
-    private func subscriptionIsCurrent(
+    private func probeIsCurrent(
         processGeneration expectedProcessGeneration: UInt64,
-        subscriptionGeneration expectedSubscriptionGeneration: UInt64
+        probeGeneration expectedProbeGeneration: UInt64
     ) -> Bool {
         !Task.isCancelled
             && desiredEnabled
             && !terminating
             && expectedProcessGeneration == generation
-            && expectedSubscriptionGeneration == subscriptionGeneration
+            && expectedProbeGeneration == probeGeneration
     }
 
     private func cancelBackgroundTasks() {

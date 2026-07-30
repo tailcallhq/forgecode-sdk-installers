@@ -387,8 +387,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         isEnabled: Bool = true,
         isToggle: Bool = false,
         trailingText: String? = nil,
-        isProminent: Bool = false,
-        showsDisclosure: Bool = false
+        isProminent: Bool = false
     ) -> NSView {
         let row = CommandRowView(target: self, action: action)
         row.isEnabled = isEnabled
@@ -397,8 +396,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             title: title,
             titleFont: .systemFont(ofSize: 12, weight: isProminent ? .semibold : .regular),
             tint: isOn ? .controlAccentColor : nil,
-            trailingText: trailingText,
-            showsDisclosure: showsDisclosure
+            trailingText: trailingText
         )
         row.toolTip = title
         row.configureAccessibility(
@@ -616,7 +614,6 @@ private final class CommandRowView: NSView {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let trailingLabel = NSTextField(labelWithString: "")
-    private let chevronView = NSImageView()
     private weak var target: AnyObject?
     private let action: Selector
     private var trackingAreaRef: NSTrackingArea?
@@ -668,15 +665,10 @@ private final class CommandRowView: NSView {
         trailingLabel.lineBreakMode = .byTruncatingTail
         trailingLabel.maximumNumberOfLines = 1
         trailingLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        chevronView.translatesAutoresizingMaskIntoConstraints = false
-        chevronView.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
-        chevronView.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
-        chevronView.contentTintColor = .tertiaryLabelColor
 
         addSubview(iconView)
         addSubview(titleLabel)
         addSubview(trailingLabel)
-        addSubview(chevronView)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
@@ -689,26 +681,17 @@ private final class CommandRowView: NSView {
                 constant: Self.iconToLabelGap
             ),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            chevronView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
-            chevronView.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.leadingAnchor.constraint(
                 greaterThanOrEqualTo: titleLabel.trailingAnchor,
                 constant: 8
+            ),
+            trailingLabel.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -Self.inset
             )
         ])
-        chevronTrailingConstraint = trailingLabel.trailingAnchor.constraint(
-            equalTo: chevronView.leadingAnchor,
-            constant: -5
-        )
-        plainTrailingConstraint = trailingLabel.trailingAnchor.constraint(
-            equalTo: trailingAnchor,
-            constant: -Self.inset
-        )
     }
-
-    private var chevronTrailingConstraint: NSLayoutConstraint?
-    private var plainTrailingConstraint: NSLayoutConstraint?
 
     func configureAccessibility(label: String, value: String?, enabled: Bool) {
         setAccessibilityLabel(label)
@@ -721,8 +704,7 @@ private final class CommandRowView: NSView {
         title: String,
         titleFont: NSFont,
         tint: NSColor?,
-        trailingText: String?,
-        showsDisclosure: Bool
+        trailingText: String?
     ) {
         iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         restingTint = tint
@@ -731,9 +713,6 @@ private final class CommandRowView: NSView {
         applyContentColors()
         trailingLabel.stringValue = trailingText ?? ""
         trailingLabel.isHidden = trailingText == nil
-        chevronView.isHidden = !showsDisclosure
-        chevronTrailingConstraint?.isActive = showsDisclosure
-        plainTrailingConstraint?.isActive = !showsDisclosure
     }
 
     /// The hover highlight is a saturated, fully opaque fill, so row content
@@ -744,12 +723,10 @@ private final class CommandRowView: NSView {
             iconView.contentTintColor = onHighlight
             titleLabel.textColor = onHighlight
             trailingLabel.textColor = onHighlight.withAlphaComponent(0.75)
-            chevronView.contentTintColor = onHighlight.withAlphaComponent(0.75)
         } else {
             iconView.contentTintColor = restingTint ?? .secondaryLabelColor
             titleLabel.textColor = restingTint ?? .labelColor
             trailingLabel.textColor = .tertiaryLabelColor
-            chevronView.contentTintColor = .tertiaryLabelColor
         }
     }
 
