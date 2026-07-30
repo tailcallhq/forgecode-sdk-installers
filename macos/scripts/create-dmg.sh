@@ -7,7 +7,6 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 require_command hdiutil
 require_command osascript
 require_command ditto
-require_command xattr
 
 [ -d "$APP_BUNDLE" ] || fail "app bundle is missing; run scripts/assemble-app.sh"
 verify_app_inventory "$APP_BUNDLE"
@@ -15,7 +14,6 @@ verify_info_plist_and_resources "$APP_BUNDLE"
 assert_no_packaged_runtime "$APP_BUNDLE" "app bundle"
 assets_dir=${ASSETS_DIR:-"$ARTIFACTS_DIR/assets"}
 [ -f "$assets_dir/dmg-background.png" ] || fail "DMG background is missing; run scripts/generate-assets.sh"
-[ -f "$assets_dir/AppIcon.icns" ] || fail "app icon is missing; run scripts/generate-assets.sh"
 
 stage="$ARTIFACTS_DIR/dmg-stage.$$"
 rw_dmg="$ARTIFACTS_DIR/$DMG_NAME-rw.$$.dmg"
@@ -75,23 +73,9 @@ actual_mount=$(attach_plist_value "$attach_plist" mount-point)
 [ "$(canonical_path "$actual_mount")" = "$(canonical_path "$mount_dir")" ] \
   || fail "writable DMG mounted at unexpected path: ${actual_mount:-none}"
 osascript "$PROJECT_ROOT/packaging/dmg-layout.applescript" "$mount_dir"
-# Install the volume icon only after the Finder layout pass: Finder's `update`
-# command re-syncs the volume root and deletes any .VolumeIcon.icns it did not
-# create, so installing it earlier silently loses the file. Then mark the volume
-# root with kHasCustomIcon (0x0400 at byte offset 8 of FinderInfo) so Finder
-# shows the icon for the mounted disk.
-install -m 0644 "$assets_dir/AppIcon.icns" "$mount_dir/.VolumeIcon.icns"
-xattr -wx com.apple.FinderInfo \
-  "0000000000000000040000000000000000000000000000000000000000000000" \
-  "$mount_dir"
-# Park the late-installed volume icon outside the visible window area and set
-# the BSD hidden flag on both support files so they never appear in the
-# drag-and-drop layout, even when Finder shows hidden files. No Finder `update`
-# here: that command deletes .VolumeIcon.icns.
-osascript -e 'on run argv
-    tell application "Finder" to set position of item ".VolumeIcon.icns" of folder (POSIX file (item 1 of argv) as alias) to {900, 270}
-end run' "$mount_dir"
-chflags hidden "$mount_dir/background.png" "$mount_dir/.VolumeIcon.icns"
+# Set the BSD hidden flag on the background so it never appears in the
+# drag-and-drop layout, even when Finder shows hidden files.
+chflags hidden "$mount_dir/background.png"
 # HFS+ may create filesystem-event bookkeeping while mounted. It is not part of
 # the release payload, so remove it before freezing and verifying the allowlist.
 if [ -d "$mount_dir/.fseventsd" ]; then
