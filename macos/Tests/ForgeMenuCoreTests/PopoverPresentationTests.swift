@@ -9,7 +9,7 @@ final class PopoverPresentationTests: XCTestCase {
         )
         let presentation = PopoverPresentation.make(snapshot: snapshot)
         XCTAssertEqual(presentation.serviceTitle, "ForgeCode")
-        XCTAssertEqual(presentation.serviceDetail, "Running")
+        XCTAssertEqual(presentation.serviceDetail, "")
         XCTAssertEqual(presentation.serviceTone, .normal)
         XCTAssertEqual(presentation.endpointAddress, "ws://127.0.0.1:50001")
         XCTAssertTrue(presentation.canOpenFrontend)
