@@ -37,24 +37,15 @@ public struct ServiceSnapshot: Equatable, Sendable {
     public var revision: UInt64
     public var phase: ServicePhase
     public var endpoint: LoopbackEndpoint?
-    /// SDK version reported by `rpc.discover` as `info.version`. Versioned
-    /// independently of the app, so both are tracked separately.
-    public var sdkVersion: String?
-    /// The app's own `CFBundleShortVersionString`. Constant for a given build.
-    public var appVersion: String?
 
     public init(
         revision: UInt64 = 0,
         phase: ServicePhase = .stopped,
-        endpoint: LoopbackEndpoint? = nil,
-        sdkVersion: String? = nil,
-        appVersion: String? = nil
+        endpoint: LoopbackEndpoint? = nil
     ) {
         self.revision = revision
         self.phase = phase
         self.endpoint = endpoint
-        self.sdkVersion = sdkVersion
-        self.appVersion = appVersion
     }
 }
 

@@ -63,7 +63,6 @@ public actor ServiceSupervisor {
         clientFactory: @escaping ClientFactory,
         logger: AppLogger = .shared,
         configuration: Configuration = Configuration(),
-        appVersion: String? = AppVersion.currentDescription,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
             try await ServiceSupervisor.systemSleep(seconds)
         },
@@ -77,9 +76,6 @@ public actor ServiceSupervisor {
         self.configuration = configuration
         self.sleep = sleep
         self.now = now
-        // Constant for the lifetime of the process, so it is never cleared
-        // alongside the service-derived identity.
-        snapshot.appVersion = appVersion
     }
 
     public func installCallbacks(snapshotHandler: SnapshotHandler? = nil) {
@@ -168,7 +164,6 @@ public actor ServiceSupervisor {
         cancelInstallationProgress()
         generation &+= 1
         probeGeneration &+= 1
-        clearServiceIdentity()
         snapshot.endpoint = nil
         snapshot.phase = .installing(.resolving)
         publishSnapshot()
@@ -291,7 +286,6 @@ public actor ServiceSupervisor {
         client = nil
         snapshot.endpoint = nil
         snapshot.phase = finalPhase
-        clearServiceIdentity()
         publishSnapshot()
     }
 
@@ -420,8 +414,8 @@ public actor ServiceSupervisor {
         }
     }
 
-    /// Polls `rpc.discover` until the service answers, then marks it ready and
-    /// records the reported SDK version. Failures inside the readiness window
+    /// Polls `rpc.discover` until the service answers, then marks it ready.
+    /// Failures inside the readiness window
     /// retry on the poll interval; persistent failure fails the lifecycle and
     /// schedules a restart.
     private func runHealthProbe(
@@ -437,16 +431,13 @@ public actor ServiceSupervisor {
             probeGeneration: expectedProbeGeneration
         ) {
             do {
-                let raw = try await client.sdkVersion()
+                _ = try await client.sdkVersion()
                 guard probeIsCurrent(
                     processGeneration: expectedProcessGeneration,
                     probeGeneration: expectedProbeGeneration
                 ) else { return }
                 readinessWatchdogTask?.cancel()
                 readinessWatchdogTask = nil
-                // Normalize through semver so a `v` prefix or stray whitespace
-                // from the server renders identically to the app's own version.
-                snapshot.sdkVersion = AppVersion.parse(raw)?.description ?? raw
                 snapshot.phase = .ready
                 restartAttempt = 0
                 publishSnapshot()
@@ -610,12 +601,6 @@ public actor ServiceSupervisor {
         restartTask = nil
         readinessWatchdogTask?.cancel()
         readinessWatchdogTask = nil
-    }
-
-    /// Clears only values derived from the running helper. The app's own
-    /// version is not service state and must survive stop and restart.
-    private func clearServiceIdentity() {
-        snapshot.sdkVersion = nil
     }
 
     private func publishSnapshot() {

@@ -508,16 +508,15 @@ final class ServiceSupervisorTests: XCTestCase {
         XCTAssertEqual(process.recordedEndpoints(), [endpoint])
         XCTAssertEqual(captured.value, [endpoint])
         XCTAssertEqual(snapshot.endpoint, endpoint)
-        XCTAssertEqual(snapshot.sdkVersion, "0.1.0")
         await supervisor.stopForTermination()
     }
 
-    func testSDKVersionIsReadOnceAndClearedOnStop() async throws {
+    func testProbeReadsOncePerRunningHelper() async throws {
         let process = RecordingProcessHost()
         let endpoint = LoopbackEndpoint(port: 50_010)
         let client = StubRPCClient([.version("0.1.0")])
-        let versioned = expectation(description: "version published")
-        versioned.assertForOverFulfill = false
+        let ready = expectation(description: "ready")
+        ready.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
             processHost: process,
             runtimeInstaller: cachedRuntimeInstaller,
@@ -526,53 +525,15 @@ final class ServiceSupervisorTests: XCTestCase {
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
-            if snapshot.sdkVersion == "0.1.0" { versioned.fulfill() }
+            if snapshot.phase == .ready { ready.fulfill() }
         }
         await supervisor.setEnabled(true)
-        await fulfillment(of: [versioned], timeout: 2)
+        await fulfillment(of: [ready], timeout: 2)
 
-        let running = await supervisor.snapshot
-        XCTAssertEqual(running.sdkVersion, "0.1.0")
         let versionCalls = await client.versionCalls()
-        XCTAssertEqual(versionCalls, 1, "the version must be read once per running helper")
+        XCTAssertEqual(versionCalls, 1, "the probe must run once per running helper")
 
         await supervisor.stopForTermination()
-        let stopped = await supervisor.snapshot
-        XCTAssertNil(stopped.sdkVersion)
-    }
-
-    func testAppVersionIsIndependentOfTheServerVersion() async throws {
-        let process = RecordingProcessHost()
-        let endpoint = LoopbackEndpoint(port: 50_030)
-        let client = StubRPCClient([.version("0.1.190")])
-        let versioned = expectation(description: "server version published")
-        versioned.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([endpoint]),
-            clientFactory: { _ in client },
-            configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01),
-            appVersion: "1.0.0"
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.sdkVersion == "0.1.190" { versioned.fulfill() }
-        }
-        await supervisor.setEnabled(true)
-        await fulfillment(of: [versioned], timeout: 2)
-
-        let running = await supervisor.snapshot
-        XCTAssertEqual(running.appVersion, "1.0.0")
-        XCTAssertEqual(running.sdkVersion, "0.1.190")
-
-        await supervisor.stopForTermination()
-        let stopped = await supervisor.snapshot
-        XCTAssertNil(stopped.sdkVersion, "the server version is service state")
-        XCTAssertEqual(
-            stopped.appVersion,
-            "1.0.0",
-            "the app version is not service state and must survive a stop"
-        )
     }
 
     func testProbeRetriesUntilServiceAnswers() async throws {
@@ -599,7 +560,6 @@ final class ServiceSupervisorTests: XCTestCase {
         await fulfillment(of: [ready], timeout: 2)
         let snapshot = await supervisor.snapshot
         XCTAssertEqual(snapshot.phase, .ready)
-        XCTAssertEqual(snapshot.sdkVersion, "0.1.0")
         let versionCalls = await client.versionCalls()
         XCTAssertEqual(versionCalls, 3, "the probe retries inside the readiness window")
         await supervisor.stopForTermination()
@@ -626,7 +586,6 @@ final class ServiceSupervisorTests: XCTestCase {
         let snapshot = await supervisor.snapshot
         XCTAssertEqual(snapshot.phase, .disabled)
         XCTAssertNil(snapshot.endpoint)
-        XCTAssertNil(snapshot.sdkVersion)
     }
 
     func testConcurrentLifecycleCommandsRemainSerialized() async {
