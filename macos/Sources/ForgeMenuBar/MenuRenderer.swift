@@ -678,7 +678,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func statusColor(for tone: PopoverPresentation.ServiceTone) -> NSColor {
         switch tone {
-        case .normal: return .systemGreen
+        case .normal: return .labelColor
         case .active: return .controlAccentColor
         case .warning: return .systemOrange
         case .inactive: return .secondaryLabelColor
