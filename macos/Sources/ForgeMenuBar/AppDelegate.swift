@@ -105,7 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.setLaunchAtLogin(enabled)
         }
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
-        popoverController.onRefresh = { [weak self] in self?.serviceController.refreshNow() }
         popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()

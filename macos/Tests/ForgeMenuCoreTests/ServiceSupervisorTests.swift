@@ -605,34 +605,6 @@ final class ServiceSupervisorTests: XCTestCase {
         await supervisor.stopForTermination()
     }
 
-    func testManualRefreshReprobesAndUpdatesTheReportedVersion() async throws {
-        let process = RecordingProcessHost()
-        let client = StubRPCClient([.version("0.1.0"), .version("0.2.0")])
-        let first = expectation(description: "first version")
-        first.assertForOverFulfill = false
-        let second = expectation(description: "second version")
-        second.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_003)]),
-            clientFactory: { _ in client },
-            configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.sdkVersion == "0.1.0" { first.fulfill() }
-            if snapshot.sdkVersion == "0.2.0" { second.fulfill() }
-        }
-        await supervisor.setEnabled(true)
-        await fulfillment(of: [first], timeout: 2)
-        await supervisor.refreshNow()
-        await fulfillment(of: [second], timeout: 2)
-        let finalSnapshot = await supervisor.snapshot
-        XCTAssertEqual(finalSnapshot.phase, .ready)
-        XCTAssertEqual(finalSnapshot.sdkVersion, "0.2.0")
-        await supervisor.stopForTermination()
-    }
-
     func testDisableClearsServiceDerivedState() async throws {
         let process = RecordingProcessHost()
         let client = StubRPCClient([.version("0.1.0")])

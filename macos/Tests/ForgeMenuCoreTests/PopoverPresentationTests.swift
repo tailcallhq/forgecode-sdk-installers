@@ -13,7 +13,6 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.serviceTone, .normal)
         XCTAssertEqual(presentation.endpointAddress, "ws://127.0.0.1:50001")
         XCTAssertTrue(presentation.canOpenFrontend)
-        XCTAssertTrue(presentation.refreshEnabled)
         XCTAssertNil(presentation.actionableError)
     }
 
@@ -71,7 +70,6 @@ final class PopoverPresentationTests: XCTestCase {
         ))
         XCTAssertEqual(starting.serviceDetail, "Starting")
         XCTAssertEqual(starting.serviceTone, .active)
-        XCTAssertTrue(starting.refreshEnabled)
         XCTAssertFalse(starting.canOpenFrontend)
 
         let failed = PopoverPresentation.make(snapshot: ServiceSnapshot(
@@ -80,7 +78,6 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertEqual(failed.serviceDetail, "Unavailable")
         XCTAssertEqual(failed.serviceTone, .warning)
         XCTAssertEqual(failed.actionableError, "helper exited")
-        XCTAssertFalse(failed.refreshEnabled)
     }
 
     func testInstallationPhasesAreCompactAndBounded() {
@@ -97,7 +94,6 @@ final class PopoverPresentationTests: XCTestCase {
             let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: .installing(phase)))
             XCTAssertEqual(presentation.serviceDetail, detail)
             XCTAssertEqual(presentation.serviceTone, .active)
-            XCTAssertFalse(presentation.refreshEnabled)
             XCTAssertFalse(presentation.canOpenFrontend)
         }
 
@@ -138,7 +134,6 @@ final class PopoverPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.serviceDetail, "Install failed")
         XCTAssertEqual(presentation.actionableError, message)
         XCTAssertTrue(presentation.retryInstallationEnabled)
-        XCTAssertFalse(presentation.refreshEnabled)
         XCTAssertNil(presentation.installationProgress)
     }
 
@@ -153,13 +148,11 @@ final class PopoverPresentationTests: XCTestCase {
             "Runtime folder access was denied. Check permissions and retry."
         )
         XCTAssertTrue(presentation.retryInstallationEnabled)
-        XCTAssertFalse(presentation.refreshEnabled)
     }
 
     func testDisabledAndStoppedDisableActions() {
         for phase in [ServicePhase.disabled, .stopped] {
             let presentation = PopoverPresentation.make(snapshot: ServiceSnapshot(phase: phase))
-            XCTAssertFalse(presentation.refreshEnabled)
             XCTAssertNil(presentation.endpointAddress)
             XCTAssertFalse(presentation.canOpenFrontend)
         }
