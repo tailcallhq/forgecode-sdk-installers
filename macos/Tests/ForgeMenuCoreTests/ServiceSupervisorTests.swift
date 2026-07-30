@@ -230,72 +230,38 @@ private struct SequenceEndpointAllocator: LoopbackEndpointAllocating {
     }
 }
 
-private actor ScriptedConversationClient: ForgeRPCClientProtocol {
-    enum Step: Sendable {
-        case snapshot([ActiveConversation])
+/// Minimal stub of the RPC client: each `sdkVersion()` call consumes the next
+/// scripted behavior (the last one repeats), so tests can model a service
+/// that answers, fails, or never responds.
+private actor StubRPCClient: ForgeRPCClientProtocol {
+    enum Behavior: Sendable {
+        case version(String)
         case failure(String)
-        case delayedSnapshot([ActiveConversation], nanoseconds: UInt64, ignoreCancellation: Bool)
-        case hold
+        case hang
     }
 
-    private var scripts: [[Step]]
-    private(set) var streamCallCount = 0
+    private var behaviors: [Behavior]
     private(set) var versionCallCount = 0
-    private(set) var listCallCount = 0
-    private let version: String?
-    private var listResults: [[ActiveConversation]]
 
-    init(
-        scripts: [[Step]],
-        version: String? = "0.1.0",
-        listResults: [[ActiveConversation]] = []
-    ) {
-        self.scripts = scripts
-        self.version = version
-        self.listResults = listResults
-    }
-
-    func activeRootConversationStream() -> AsyncThrowingStream<[ActiveConversation], Error> {
-        streamCallCount += 1
-        let steps = scripts.isEmpty ? [.hold] : scripts.removeFirst()
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                for step in steps {
-                    switch step {
-                    case .snapshot(let values): continuation.yield(values)
-                    case .failure(let message):
-                        continuation.finish(throwing: ForgeCoreError.connection(message))
-                        return
-                    case .delayedSnapshot(let values, let nanoseconds, let ignoreCancellation):
-                        do { try await Task.sleep(nanoseconds: nanoseconds) }
-                        catch { if !ignoreCancellation { continuation.finish(throwing: CancellationError()); return } }
-                        continuation.yield(values)
-                    case .hold:
-                        do { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
-                        catch { continuation.finish(throwing: CancellationError()); return }
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { @Sendable _ in task.cancel() }
-        }
-    }
-
-    func activeRootConversations() async throws -> [ActiveConversation] {
-        listCallCount += 1
-        guard !listResults.isEmpty else { return [] }
-        return listResults.count == 1 ? listResults[0] : listResults.removeFirst()
+    init(_ behaviors: [Behavior] = [.version("0.1.0")]) {
+        self.behaviors = behaviors
     }
 
     func sdkVersion() async throws -> String {
         versionCallCount += 1
-        guard let version else { throw ForgeCoreError.connection("version unavailable") }
-        return version
+        let behavior = behaviors.count == 1 ? behaviors[0] : behaviors.removeFirst()
+        switch behavior {
+        case .version(let version):
+            return version
+        case .failure(let message):
+            throw ForgeCoreError.connection(message)
+        case .hang:
+            try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            throw CancellationError()
+        }
     }
 
-    func calls() -> Int { streamCallCount }
     func versionCalls() -> Int { versionCallCount }
-    func listCalls() -> Int { listCallCount }
 }
 
 private actor SupervisorRuntimeNetwork: RuntimeNetworkClient {
@@ -428,7 +394,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: cachedRuntimeInstaller,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_050)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.snapshot([]), .hold]]) },
+            clientFactory: { _ in StubRPCClient() },
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
@@ -444,9 +410,9 @@ final class ServiceSupervisorTests: XCTestCase {
         XCTAssertTrue(zip(values, values.dropFirst()).allSatisfy(<))
     }
 
-    func testSilentInitialStreamTriggersIndependentReadinessWatchdog() async throws {
+    func testSilentServiceTriggersIndependentReadinessWatchdog() async throws {
         let process = RecordingProcessHost()
-        let failed = expectation(description: "silent stream failed readiness")
+        let failed = expectation(description: "silent service failed readiness")
         failed.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
             processHost: process,
@@ -454,7 +420,7 @@ final class ServiceSupervisorTests: XCTestCase {
             endpointAllocator: SequenceEndpointAllocator([
                 LoopbackEndpoint(port: 50_051), LoopbackEndpoint(port: 50_052)
             ]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) },
+            clientFactory: { _ in StubRPCClient([.hang]) },
             configuration: .init(
                 readinessTimeout: 0.05,
                 readinessPollInterval: 0.01,
@@ -485,7 +451,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_053)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) },
+            clientFactory: { _ in StubRPCClient([.hang]) },
             configuration: .init(installationProgressPublishInterval: 0.05)
         )
         await supervisor.installCallbacks { snapshot in
@@ -519,12 +485,10 @@ final class ServiceSupervisorTests: XCTestCase {
         await supervisor.stopForTermination()
     }
 
-    func testStartInjectsSameEndpointAndBecomesReadyFromFirstSnapshot() async throws {
+    func testStartInjectsSameEndpointAndBecomesReadyFromFirstProbe() async throws {
         let process = RecordingProcessHost()
         let endpoint = LoopbackEndpoint(port: 50_001)
-        let client = ScriptedConversationClient(scripts: [[
-            .snapshot([ActiveConversation(id: "root", title: "Root")]), .hold
-        ]])
+        let client = StubRPCClient([.version("0.1.0")])
         let captured = Locked<[LoopbackEndpoint]>([])
         let ready = expectation(description: "ready")
         ready.assertForOverFulfill = false
@@ -536,7 +500,7 @@ final class ServiceSupervisorTests: XCTestCase {
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
-            if snapshot.phase == .ready, snapshot.activeConversations.count == 1 { ready.fulfill() }
+            if snapshot.phase == .ready { ready.fulfill() }
         }
         await supervisor.setEnabled(true)
         await fulfillment(of: [ready], timeout: 2)
@@ -544,19 +508,14 @@ final class ServiceSupervisorTests: XCTestCase {
         XCTAssertEqual(process.recordedEndpoints(), [endpoint])
         XCTAssertEqual(captured.value, [endpoint])
         XCTAssertEqual(snapshot.endpoint, endpoint)
-        XCTAssertEqual(snapshot.conversationStreamState, .subscribed)
-        XCTAssertEqual(snapshot.activeConversations, [ActiveConversation(id: "root", title: "Root")])
+        XCTAssertEqual(snapshot.sdkVersion, "0.1.0")
         await supervisor.stopForTermination()
     }
 
     func testSDKVersionIsReadOnceAndClearedOnStop() async throws {
         let process = RecordingProcessHost()
         let endpoint = LoopbackEndpoint(port: 50_010)
-        let client = ScriptedConversationClient(scripts: [[
-            .snapshot([ActiveConversation(id: "a", title: "A")]),
-            .snapshot([ActiveConversation(id: "b", title: "B")]),
-            .hold
-        ]], version: "0.1.0")
+        let client = StubRPCClient([.version("0.1.0")])
         let versioned = expectation(description: "version published")
         versioned.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
@@ -585,9 +544,7 @@ final class ServiceSupervisorTests: XCTestCase {
     func testAppVersionIsIndependentOfTheServerVersion() async throws {
         let process = RecordingProcessHost()
         let endpoint = LoopbackEndpoint(port: 50_030)
-        let client = ScriptedConversationClient(scripts: [[
-            .snapshot([ActiveConversation(id: "a", title: "A")]), .hold
-        ]], version: "0.1.190")
+        let client = StubRPCClient([.version("0.1.190")])
         let versioned = expectation(description: "server version published")
         versioned.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
@@ -618,90 +575,14 @@ final class ServiceSupervisorTests: XCTestCase {
         )
     }
 
-    func testPlaceholderTitleIsUpdatedWithoutAStreamEmission() async throws {
-        let process = RecordingProcessHost()
-        let endpoint = LoopbackEndpoint(port: 50_020)
-        // The stream emits once and then holds, exactly as the SDK behaves
-        // while a run is in flight: no further list emission until it ends.
-        let client = ScriptedConversationClient(
-            scripts: [[
-                .snapshot([
-                    ActiveConversation(id: "a", title: "Untitled"),
-                    ActiveConversation(id: "b", title: "Kept")
-                ]),
-                .hold
-            ]],
-            listResults: [[
-                ActiveConversation(id: "a", title: "Generated Title"),
-                ActiveConversation(id: "b", title: "Changed Elsewhere")
-            ]]
-        )
-        let titled = expectation(description: "title reconciled")
-        titled.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([endpoint]),
-            clientFactory: { _ in client },
-            configuration: .init(
-                readinessTimeout: 1,
-                readinessPollInterval: 0.01,
-                titleRefreshInterval: 0.05
-            )
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.activeConversations.first?.title == "Generated Title" { titled.fulfill() }
-        }
-        await supervisor.setEnabled(true)
-        await fulfillment(of: [titled], timeout: 3)
-
-        let snapshot = await supervisor.snapshot
-        XCTAssertEqual(snapshot.activeConversations, [
-            ActiveConversation(id: "a", title: "Generated Title"),
-            // A row that already had a real title is never overwritten by the
-            // reconciliation pass; the stream stays authoritative for it.
-            ActiveConversation(id: "b", title: "Kept")
-        ])
-        await supervisor.stopForTermination()
-    }
-
-    func testTitleRefreshStopsWhenNoPlaceholdersRemain() async throws {
-        let process = RecordingProcessHost()
-        let endpoint = LoopbackEndpoint(port: 50_021)
-        let client = ScriptedConversationClient(
-            scripts: [[.snapshot([ActiveConversation(id: "a", title: "Real")]), .hold]]
-        )
-        let ready = expectation(description: "ready")
-        ready.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([endpoint]),
-            clientFactory: { _ in client },
-            configuration: .init(
-                readinessTimeout: 1,
-                readinessPollInterval: 0.01,
-                titleRefreshInterval: 0.02
-            )
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.phase == .ready { ready.fulfill() }
-        }
-        await supervisor.setEnabled(true)
-        await fulfillment(of: [ready], timeout: 2)
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        let listCalls = await client.listCalls()
-        XCTAssertEqual(listCalls, 0, "no polling when every row already has a title")
-        await supervisor.stopForTermination()
-    }
-
-    func testVersionFailureDoesNotAffectServiceState() async throws {
+    func testProbeRetriesUntilServiceAnswers() async throws {
         let process = RecordingProcessHost()
         let endpoint = LoopbackEndpoint(port: 50_011)
-        let client = ScriptedConversationClient(scripts: [[
-            .snapshot([ActiveConversation(id: "a", title: "A")]), .hold
-        ]], version: nil)
+        let client = StubRPCClient([
+            .failure("connection refused"),
+            .failure("connection refused"),
+            .version("0.1.0")
+        ])
         let ready = expectation(description: "ready")
         ready.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
@@ -712,59 +593,24 @@ final class ServiceSupervisorTests: XCTestCase {
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
-            if snapshot.phase == .ready, snapshot.activeConversations.count == 1 { ready.fulfill() }
+            if snapshot.phase == .ready { ready.fulfill() }
         }
         await supervisor.setEnabled(true)
         await fulfillment(of: [ready], timeout: 2)
         let snapshot = await supervisor.snapshot
         XCTAssertEqual(snapshot.phase, .ready)
-        XCTAssertNil(snapshot.sdkVersion)
-        XCTAssertNil(snapshot.streamError)
+        XCTAssertEqual(snapshot.sdkVersion, "0.1.0")
+        let versionCalls = await client.versionCalls()
+        XCTAssertEqual(versionCalls, 3, "the probe retries inside the readiness window")
         await supervisor.stopForTermination()
     }
 
-    func testStreamInterruptionClearsRowsAndReconnectsWithAuthoritativeSnapshot() async throws {
+    func testManualRefreshReprobesAndUpdatesTheReportedVersion() async throws {
         let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [
-            [.snapshot([ActiveConversation(id: "old", title: "Old")]), .failure("lost")],
-            [.snapshot([ActiveConversation(id: "new", title: "New")]), .hold]
-        ])
-        let reconnected = expectation(description: "reconnected")
-        reconnected.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_002)]),
-            clientFactory: { _ in client },
-            configuration: .init(
-                readinessTimeout: 1,
-                readinessPollInterval: 0.01,
-                streamReconnectBackoff: .init(baseDelay: 0.01, maximumDelay: 0.01)
-            )
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.activeConversations == [ActiveConversation(id: "new", title: "New")] {
-                reconnected.fulfill()
-            }
-        }
-        await supervisor.setEnabled(true)
-        await fulfillment(of: [reconnected], timeout: 2)
-        let calls = await client.calls()
-        let finalSnapshot = await supervisor.snapshot
-        XCTAssertEqual(calls, 2)
-        XCTAssertEqual(finalSnapshot.activeConversations.map(\.id), ["new"])
-        await supervisor.stopForTermination()
-    }
-
-    func testManualRefreshImmediatelyResubscribesAndReplacesRows() async throws {
-        let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [
-            [.snapshot([ActiveConversation(id: "first", title: "First")]), .hold],
-            [.snapshot([ActiveConversation(id: "second", title: "Second")]), .hold]
-        ])
-        let first = expectation(description: "first")
+        let client = StubRPCClient([.version("0.1.0"), .version("0.2.0")])
+        let first = expectation(description: "first version")
         first.assertForOverFulfill = false
-        let second = expectation(description: "second")
+        let second = expectation(description: "second version")
         second.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
             processHost: process,
@@ -774,25 +620,22 @@ final class ServiceSupervisorTests: XCTestCase {
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
-            if snapshot.activeConversations.first?.id == "first" { first.fulfill() }
-            if snapshot.activeConversations.first?.id == "second" { second.fulfill() }
+            if snapshot.sdkVersion == "0.1.0" { first.fulfill() }
+            if snapshot.sdkVersion == "0.2.0" { second.fulfill() }
         }
         await supervisor.setEnabled(true)
         await fulfillment(of: [first], timeout: 2)
         await supervisor.refreshNow()
         await fulfillment(of: [second], timeout: 2)
-        let calls = await client.calls()
         let finalSnapshot = await supervisor.snapshot
-        XCTAssertEqual(calls, 2)
-        XCTAssertEqual(finalSnapshot.activeConversations.map(\.id), ["second"])
+        XCTAssertEqual(finalSnapshot.phase, .ready)
+        XCTAssertEqual(finalSnapshot.sdkVersion, "0.2.0")
         await supervisor.stopForTermination()
     }
 
-    func testDisableClearsConversationAndStreamState() async throws {
+    func testDisableClearsServiceDerivedState() async throws {
         let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [[
-            .snapshot([ActiveConversation(id: "active", title: "Active")]), .hold
-        ]])
+        let client = StubRPCClient([.version("0.1.0")])
         let ready = expectation(description: "ready")
         ready.assertForOverFulfill = false
         let supervisor = ServiceSupervisor(
@@ -803,7 +646,7 @@ final class ServiceSupervisorTests: XCTestCase {
             configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
         )
         await supervisor.installCallbacks { snapshot in
-            if !snapshot.activeConversations.isEmpty { ready.fulfill() }
+            if snapshot.phase == .ready { ready.fulfill() }
         }
         await supervisor.setEnabled(true)
         await fulfillment(of: [ready], timeout: 2)
@@ -811,46 +654,13 @@ final class ServiceSupervisorTests: XCTestCase {
         let snapshot = await supervisor.snapshot
         XCTAssertEqual(snapshot.phase, .disabled)
         XCTAssertNil(snapshot.endpoint)
-        XCTAssertTrue(snapshot.activeConversations.isEmpty)
-        XCTAssertEqual(snapshot.conversationStreamState, .disconnected)
-        XCTAssertNil(snapshot.streamError)
-    }
-
-    func testLateSnapshotFromSupersededSubscriptionCannotOverwriteNewGeneration() async throws {
-        let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [
-            [.delayedSnapshot([ActiveConversation(id: "late", title: "Late")], nanoseconds: 200_000_000, ignoreCancellation: true), .hold],
-            [.snapshot([ActiveConversation(id: "current", title: "Current")]), .hold]
-        ])
-        let current = expectation(description: "current")
-        current.assertForOverFulfill = false
-        let supervisor = ServiceSupervisor(
-            processHost: process,
-            runtimeInstaller: cachedRuntimeInstaller,
-            endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_005)]),
-            clientFactory: { _ in client },
-            configuration: .init(readinessTimeout: 1, readinessPollInterval: 0.01)
-        )
-        await supervisor.installCallbacks { snapshot in
-            if snapshot.activeConversations.first?.id == "current" { current.fulfill() }
-        }
-        await supervisor.setEnabled(true)
-        let firstSubscriptionDeadline = Date().addingTimeInterval(1)
-        while await client.calls() < 1, Date() < firstSubscriptionDeadline {
-            try? await Task.sleep(nanoseconds: 1_000_000)
-        }
-        await supervisor.refreshNow()
-        await fulfillment(of: [current], timeout: 2)
-        try await Task.sleep(nanoseconds: 300_000_000)
-        let finalSnapshot = await supervisor.snapshot
-        XCTAssertEqual(finalSnapshot.activeConversations.map(\.id), ["current"])
-        await supervisor.stopForTermination()
+        XCTAssertNil(snapshot.sdkVersion)
     }
 
     func testConcurrentLifecycleCommandsRemainSerialized() async {
         let process = RecordingProcessHost()
         process.operationDelay = 0.03
-        let client = ScriptedConversationClient(scripts: [[.hold], [.hold]])
+        let client = StubRPCClient([.hang])
         let supervisor = ServiceSupervisor(
             processHost: process,
             runtimeInstaller: cachedRuntimeInstaller,
@@ -872,7 +682,7 @@ final class ServiceSupervisorTests: XCTestCase {
 
     func testLatestDesiredStateRevisionWinsWhenOlderTaskArrivesLater() async {
         let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [[.hold]])
+        let client = StubRPCClient([.hang])
         let supervisor = ServiceSupervisor(
             processHost: process,
             runtimeInstaller: cachedRuntimeInstaller,
@@ -895,7 +705,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_039)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -923,7 +733,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_040)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks { snapshot in
             phases.withValue { $0.append(snapshot.phase) }
@@ -964,7 +774,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_041)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1035,7 +845,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_054)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1092,7 +902,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_042)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1119,7 +929,7 @@ final class ServiceSupervisorTests: XCTestCase {
                 processHost: process,
                 runtimeInstaller: installer,
                 endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_049)]),
-                clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+                clientFactory: { _ in StubRPCClient([.hang]) }
             )
             await supervisor.installCallbacks()
             await supervisor.setDesiredEnabled(true, revision: 1)
@@ -1157,7 +967,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_043)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1183,7 +993,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_048)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1210,7 +1020,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_044)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1234,7 +1044,7 @@ final class ServiceSupervisorTests: XCTestCase {
             processHost: process,
             runtimeInstaller: installer,
             endpointAllocator: SequenceEndpointAllocator([LoopbackEndpoint(port: 50_045)]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) }
+            clientFactory: { _ in StubRPCClient([.hang]) }
         )
         await supervisor.installCallbacks()
 
@@ -1277,7 +1087,7 @@ final class ServiceSupervisorTests: XCTestCase {
             endpointAllocator: SequenceEndpointAllocator([
                 LoopbackEndpoint(port: 50_046), LoopbackEndpoint(port: 50_047)
             ]),
-            clientFactory: { _ in ScriptedConversationClient(scripts: [[.hold]]) },
+            clientFactory: { _ in StubRPCClient([.hang]) },
             configuration: .init(restartBackoff: .init(baseDelay: 0.01, maximumDelay: 0.01))
         )
         await supervisor.installCallbacks()
@@ -1302,7 +1112,7 @@ final class ServiceSupervisorTests: XCTestCase {
 
     func testUnexpectedExitSchedulesRestartWithNewEndpoint() async {
         let process = RecordingProcessHost()
-        let client = ScriptedConversationClient(scripts: [[.hold], [.hold]])
+        let client = StubRPCClient([.hang])
         let supervisor = ServiceSupervisor(
             processHost: process,
             runtimeInstaller: cachedRuntimeInstaller,

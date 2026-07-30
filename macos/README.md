@@ -1,6 +1,6 @@
 # ForgeCode for macOS
 
-A menu-bar-only AppKit application that supervises a local ForgeCode WebSocket service and shows currently running root conversations in a compact native popover. The package targets macOS 13 or later and is SwiftPM-based with no remote package dependencies; the only binary dependency is the Sparkle 2 updater framework, vendored locally as an XCFramework. The app and DMG contain no service-runtime binary.
+A menu-bar-only AppKit application that supervises a local ForgeCode WebSocket service and shows its status in a compact native popover. The package targets macOS 13 or later and is SwiftPM-based with no remote package dependencies; the only binary dependency is the Sparkle 2 updater framework, vendored locally as an XCFramework. The app and DMG contain no service-runtime binary.
 
 ## Prerequisites
 
@@ -54,21 +54,17 @@ Open the DMG, drag **ForgeCode** to **Applications**, then launch it. The app ha
 
 The popover contains:
 
-- a tiny service header with the number of running root conversations;
+- a tiny service header with the current service state;
 - a scrollable body;
 - a fixed footer with the port, **Open**, and **Refresh**.
 
-The body shows the commands directly: a **Conversations** disclosure row followed by Launch at Login and its approval path, Open Logs, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button.
+The body shows the commands directly: Launch at Login and its approval path, Open Logs, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button. **Refresh** re-probes the running service and re-reads its reported server version.
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
 
-Selecting **Conversations** expands the list in place; the row summarises the current state (`3 running`, `None running`, `Connecting…`) and is inert while the service is not running. A back row returns to the commands, and closing the popover always resets to the commands view.
-
-Only root conversations whose SDK status is exactly `running` appear. Titles come from the string `variables.title`, are trimmed, and fall back to **Untitled**. Selecting a row opens that conversation in the default browser.
-
 ### Console origin
 
-Conversation links use this default origin:
+The footer **Open** link uses this default origin:
 
 ```text
 https://console.forgecode.dev
@@ -80,18 +76,17 @@ Set the `FORGE_CONSOLE_ORIGIN` environment variable to override it. For local fr
 FORGE_CONSOLE_ORIGIN=http://127.0.0.1:5173
 ```
 
-There is no persisted origin preference and no in-app editor; the environment variable is the only override. Origins must contain only an `http` or `https` scheme, host, optional port, and root path; credentials, non-root paths, queries, and fragments are rejected. Conversation links are built as `/c/<percent-encoded-conversation-id>`, so conversation IDs cannot inject paths, queries, or fragments.
+There is no persisted origin preference and no in-app editor; the environment variable is the only override. Origins must contain only an `http` or `https` scheme, host, optional port, and root path; credentials, non-root paths, queries, and fragments are rejected.
 
-Both **Open** and conversation links append the running backend endpoint so the frontend connects to this service automatically:
+**Open** appends the running backend endpoint so the frontend connects to this service automatically:
 
 ```text
 https://console.forgecode.dev/?connect=127.0.0.1:9755
-https://console.forgecode.dev/c/<conversation-id>?connect=127.0.0.1:9755
 ```
 
 The query value always reflects the port the helper actually bound, so a fallback port such as `9755` connects without any manual configuration.
 
-## Service and active-conversation architecture
+## Service architecture
 
 When the app launches and first requires the service, ForgeCode installs the runtime under `~/Library/Application Support/ForgeCode/runtime` if it is not already present. Before a newly downloaded runtime is activated, the installer validates the immutable HTTPS release version used for tag and artifact URL selection, checksum sidecar, archive structure, Mach-O architecture, embedded signature structure, signature class, pinned executable identity, and quarantine policy. Installed runtime directories, executables, and receipts use modes `0700`, `0700`, and `0600`. On later lookup or launch, the receipt is metadata and a candidate locator only: stale version/hash fields are allowed, and neither receipt hashes nor executable checksum, Mach-O, signature, inode, size, or original version are revalidated. The managed executable is accepted only through a safe no-symlink path with a private current-owner directory and a current-owner, regular, single-link, non-group/world-writable, owner-executable file. Parent-directory-pinned relative spawning preserves path-race protection while allowing legitimate self-replacement between launches. It then launches the installed runtime as:
 
@@ -101,32 +96,7 @@ forge3 --log-format json ws --addr 127.0.0.1:<first-free-port-from-9753>
 
 The ForgeCode installer does not poll for newer runtimes at app startup or in the background. The app's own lifetime is the desired state: the service is started at launch and stopped on termination. Unexpected exits and readiness failures use bounded exponential restart backoff. Stop and app termination use bounded `TERM`, `KILL`, and child reaping, with best-effort process-group cleanup. The runtime environment is allowlisted instead of copied wholesale, and JSON-aware/text fallback redaction is applied before bounded rotating logs are stored in `~/Library/Logs/ForgeMenuBar/`.
 
-The active app does not poll usage, extensions, models, or providers. It opens an SDK stream using a string request ID and the exact request:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "<string-id>",
-  "method": "extension/xstream",
-  "params": {
-    "conversation_list": {
-      "relation": {
-        "type": "roots"
-      }
-    }
-  }
-}
-```
-
-`SdkRpcHandler<HostRequest>` reconstructs the externally tagged host request from the outer RPC method and params. Therefore the one-shot outer method is `extension`, the streaming method is `extension/xstream`, and the inner `conversation_list` tag must remain inside params exactly as shown. The client validates the initial `result.data.stream` pointer against both `extension/xstream` and `request_id`, then accepts only `extension/xstream` notifications for that request with contiguous monotonic sequence IDs. Replacement snapshots are parsed only from:
-
-```text
-params.stream.result.extension.conversation_list.conversations
-```
-
-Every snapshot is authoritative and replaces the previous active list. Stream errors, completion, malformed sequence, socket failure, and disconnect are interruptions: active rows are cleared and the app reconnects with bounded backoff while the service remains desired and running. Each subscription receives a new request ID. **Refresh** cancels the current subscription, clears its rows, and immediately creates a fresh subscription. Process and subscription generations prevent late frames from superseded work from updating current state. Stopping the service clears all conversation and stream-derived state.
-
-A one-shot implementation using outer method `extension`, the same externally tagged `conversation_list` roots params, and the exact complete response path is retained as a tested fallback contract, but the active application uses streaming. The obsolete outer methods `conversation_list` and `conversation_list/xstream` are intentionally not accepted.
+The active app does not poll usage, extensions, models, or providers. Readiness and health are probed with a single one-shot `rpc.discover` request per lifecycle (and again on **Refresh**): a successful round trip marks the service ready, and `result.data.complete["rpc.discover"].info.version` supplies the server version shown in the header. Failures inside the readiness window retry on a short poll interval; persistent failure fails the lifecycle and triggers a supervised restart. Process and probe generations prevent late responses from superseded work from updating current state. Stopping the service clears all service-derived state.
 
 ## Signed release
 
@@ -152,5 +122,4 @@ Useful individual commands are `scripts/assemble-app.sh`, `scripts/sign-app.sh`,
 - **Temporary explicit ad-hoc runtime trust policy:** the current public `forge3` artifact is ad-hoc signed rather than Developer ID signed/notarized. After the installer validates the immutable HTTPS version/tag selection, checksum sidecar, archive safety, native Mach-O architecture, embedded signature structure, signature class, and stable single-link user-owned executable identity, it inspects quarantine. If and only if the validated signature class is ad-hoc and `com.apple.quarantine` is present, the injected pre-execution trust policy authorizes a fresh same-directory vnode. Descriptor-relative exclusive no-follow operations copy bytes from the pinned validated source vnode, preserve safe executable permissions and unrelated extended attributes, omit only quarantine, synchronize the file and directory, and atomically replace the staged basename. Before installation, the installer captures a new device/inode/size/hash identity and repeats hash, Mach-O, architecture, embedded-signature, ad-hoc-class, identity, and quarantine-absence checks; any failure prevents activation. Developer ID, other signed, unsigned, or already-unquarantined artifacts are not modified. The installer does not remove quarantine in response to runtime launch behavior because it performs no staged runtime execution. This deliberately bypasses Gatekeeper's quarantine-based first-launch assessment only for the exact checksum- and identity-validated ad-hoc artifact; HTTPS origin and checksum integrity are therefore temporary trust boundaries until upstream publishes a properly Developer ID signed and notarized runtime, at which point this exception should be removed.
 - The installed runtime owns the selected port after a short bind-probe race; readiness supervision handles a lost race by stopping and retrying on the next available incremental port.
 - Process-group cleanup is best effort on macOS. Descendants that deliberately escape the runtime's process group require a privileged service architecture for reliable discovery.
-- Active conversations depend on the user's ForgeCode conversation-storage and execute extensions being available through the local service runtime.
-- The popover is intentionally fixed at 288 × 336 pt; large active sets scroll, and long titles truncate while remaining available as tooltips.
+- The popover is intentionally fixed in size; overflowing content scrolls, and long text truncates while remaining available as tooltips.

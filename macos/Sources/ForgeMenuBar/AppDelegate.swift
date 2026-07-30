@@ -118,9 +118,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()
         }
-        popoverController.onOpenConversation = { [weak self] conversationID in
-            self?.openConversation(conversationID)
-        }
         popoverController.onShowError = { [weak self] message in
             let error = NSError(domain: "ForgeMenuBar", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: message
@@ -144,23 +141,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             logger.error("Could not open ForgeCode frontend: \(error.localizedDescription)")
             presentActionError(title: "ForgeCode frontend could not be opened", error: error)
-        }
-    }
-
-    private func openConversation(_ conversationID: String) {
-        do {
-            let origin = try ConsoleURLBuilder.resolvedOrigin()
-            let url = try ConsoleURLBuilder.conversationURL(
-                conversationID: conversationID,
-                origin: origin,
-                endpoint: serviceController.snapshot.endpoint
-            )
-            guard NSWorkspace.shared.open(url) else {
-                throw ForgeCoreError.connection("The default browser did not accept the ForgeCode console URL.")
-            }
-        } catch {
-            logger.error("Could not open conversation: \(error.localizedDescription)")
-            presentActionError(title: "Conversation could not be opened", error: error)
         }
     }
 

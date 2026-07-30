@@ -11,8 +11,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         case unavailable(String)
     }
 
-    // Sized so the default command list fits without scrolling, with the
-    // remaining height given to the expanded conversation list, which scrolls
+    // Sized so the command list fits without scrolling; overflow scrolls
     // within the same fixed frame.
     static let contentSize = NSSize(width: 288, height: 280)
     private static let bodyContentWidth: CGFloat = 280
@@ -30,7 +29,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onRetryInstallation: (() -> Void)?
     var onOpenLogs: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
-    var onOpenConversation: ((String) -> Void)?
     var onShowError: ((String) -> Void)?
     var onCheckForUpdates: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -52,7 +50,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private var loginItemState: LoginItemState = .disabled
     private var presentation = PopoverPresentation.make(snapshot: ServiceSnapshot())
     private var visibilityState: PopoverVisibilityState = .hidden
-    private var mode: PopoverMode = .commands
     private weak var statusButton: NSStatusBarButton?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
@@ -266,22 +263,18 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             ? frontendTooltip
             : "The frontend can be opened once the ForgeCode service is running"
         refreshButton.isEnabled = presentation.refreshEnabled
-        rebuildConversationBody()
+        rebuildBody()
     }
 
-    private func rebuildConversationBody() {
+    private func rebuildBody() {
         bodyStack.arrangedSubviews.forEach {
             bodyStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        switch mode {
-        case .commands: buildCommandBody()
-        case .conversations: buildConversationBody()
-        }
+        buildCommandBody()
     }
 
-    /// The default body: the conversation disclosure row followed by the
-    /// commands that previously lived behind the overflow button.
+    /// The body: the command rows.
     private func buildCommandBody() {
         if let progress = presentation.installationProgress {
             bodyStack.addArrangedSubview(installationProgressView(progress))
@@ -296,9 +289,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             ))
             bodyStack.addArrangedSubview(groupSpacer())
         }
-
-        bodyStack.addArrangedSubview(conversationsDisclosureRow())
-        bodyStack.addArrangedSubview(groupSpacer())
 
         bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
@@ -341,24 +331,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             action: #selector(quitCommand),
             trailingText: "⌘Q"
         ))
-    }
-
-    /// The expanded conversation list, reached from the disclosure row.
-    private func buildConversationBody() {
-        bodyStack.addArrangedSubview(commandRow(
-            title: "Conversations",
-            symbol: "chevron.left",
-            action: #selector(collapseConversations),
-            trailingText: presentation.conversationsSummary,
-            isProminent: true
-        ))
-        bodyStack.addArrangedSubview(groupSpacer())
-        if let message = presentation.bodyMessage {
-            bodyStack.addArrangedSubview(noteView(message, centered: true))
-        }
-        for conversation in presentation.conversations {
-            bodyStack.addArrangedSubview(conversationRow(conversation))
-        }
     }
 
     private func installationProgressView(
@@ -407,17 +379,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return container
     }
 
-    private func conversationsDisclosureRow() -> NSView {
-        commandRow(
-            title: "Conversations",
-            symbol: "bubble.left.and.bubble.right",
-            action: #selector(expandConversations),
-            isEnabled: presentation.canExpandConversations,
-            trailingText: presentation.conversationsSummary,
-            showsDisclosure: presentation.canExpandConversations
-        )
-    }
-
     private func commandRow(
         title: String,
         symbol: String,
@@ -463,7 +424,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Secondary text aligned to the label column, so it reads as a note about
     /// the row above rather than a row of its own.
-    private func noteView(_ text: String, centered: Bool = false) -> NSView {
+    private func noteView(_ text: String) -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: text)
@@ -471,10 +432,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         label.textColor = .tertiaryLabelColor
         label.maximumNumberOfLines = 2
         label.lineBreakMode = .byTruncatingTail
-        label.alignment = centered ? .center : .left
+        label.alignment = .left
         label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(label)
-        let leading = centered ? Self.rowInset : Self.labelColumnInset
+        let leading = Self.labelColumnInset
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
             label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: leading),
@@ -483,25 +444,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -5)
         ])
         return container
-    }
-
-    /// Conversation rows use the same metrics as command rows so the icon and
-    /// label columns stay aligned across both views.
-    private func conversationRow(_ conversation: PopoverPresentation.ConversationRow) -> NSView {
-        let row = CommandRowView(target: self, action: #selector(openConversation(_:)))
-        row.representedID = conversation.id
-        row.configure(
-            symbol: "bubble.left",
-            title: conversation.title,
-            titleFont: .systemFont(ofSize: 12, weight: .regular),
-            tint: nil,
-            trailingText: nil,
-            showsDisclosure: false
-        )
-        row.toolTip = conversation.title
-        row.setAccessibilityLabel(conversation.title)
-        row.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth).isActive = true
-        return row
     }
 
     private func applyVisibilityEvent(_ event: PopoverVisibilityEvent, relativeTo button: NSStatusBarButton? = nil) {
@@ -601,34 +543,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
-        // Reopening always starts on the commands list.
-        mode = PopoverModeReducer.reduce(state: mode, event: .popoverDidClose)
         applyVisibilityEvent(.popoverDidClose)
     }
 
-    @objc private func openConversation(_ sender: Any?) {
-        guard let id = (sender as? CommandRowView)?.representedID else { return }
-        close()
-        onOpenConversation?(id)
-    }
     @objc private func refresh() { onRefresh?() }
-
-    @objc private func expandConversations() {
-        guard presentation.canExpandConversations else { return }
-        setMode(.conversations)
-    }
-
-    @objc private func collapseConversations() { setMode(.commands) }
-
-    private func setMode(_ next: PopoverMode) {
-        let event: PopoverModeEvent = next == .conversations ? .expandConversations : .collapseConversations
-        let resolved = PopoverModeReducer.reduce(state: mode, event: event)
-        guard resolved != mode else { return }
-        mode = resolved
-        rebuild()
-        scrollView.contentView.scroll(to: .zero)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-    }
 
     // Toggles keep the popover open so the resulting state change is visible.
     @objc private func toggleLaunchAtLoginCommand() {
@@ -701,8 +619,6 @@ private final class CommandRowView: NSView {
     private let chevronView = NSImageView()
     private weak var target: AnyObject?
     private let action: Selector
-    /// Identifier carried by conversation rows.
-    var representedID: String?
     private var trackingAreaRef: NSTrackingArea?
     private var isHovered = false {
         didSet {
