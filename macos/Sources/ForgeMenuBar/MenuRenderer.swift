@@ -180,9 +180,18 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         titleStack.alignment = .leading
         titleStack.spacing = 1
         titleStack.translatesAutoresizingMaskIntoConstraints = false
+        openFrontendButton.title = "Open"
+        openFrontendButton.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
+        openFrontendButton.imagePosition = .imageLeading
+        openFrontendButton.bezelStyle = .rounded
+        openFrontendButton.controlSize = .small
+        openFrontendButton.target = self
+        openFrontendButton.action = #selector(openFrontendCommand)
+        openFrontendButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(statusIcon)
         container.addSubview(titleStack)
         container.addSubview(statusDetail)
+        container.addSubview(openFrontendButton)
         NSLayoutConstraint.activate([
             statusIcon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset + 2),
             statusIcon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
@@ -192,9 +201,13 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             titleStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             titleStack.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
             statusDetail.leadingAnchor.constraint(greaterThanOrEqualTo: titleStack.trailingAnchor, constant: 6),
-            statusDetail.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
+            statusDetail.trailingAnchor.constraint(equalTo: openFrontendButton.leadingAnchor, constant: -6),
             statusDetail.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            statusDetail.widthAnchor.constraint(lessThanOrEqualToConstant: 96)
+            statusDetail.widthAnchor.constraint(lessThanOrEqualToConstant: 96),
+            openFrontendButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
+            openFrontendButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            openFrontendButton.widthAnchor.constraint(equalToConstant: 64),
+            openFrontendButton.heightAnchor.constraint(equalToConstant: 26)
         ])
         return container
     }
@@ -202,14 +215,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private func buildFooter() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        openFrontendButton.title = "Open"
-        openFrontendButton.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
-        openFrontendButton.imagePosition = .imageLeading
-        openFrontendButton.bezelStyle = .rounded
-        openFrontendButton.controlSize = .small
-        openFrontendButton.target = self
-        openFrontendButton.action = #selector(openFrontendCommand)
-        openFrontendButton.translatesAutoresizingMaskIntoConstraints = false
         refreshButton.title = "Refresh"
         refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
         refreshButton.imagePosition = .imageLeading
@@ -218,18 +223,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         refreshButton.target = self
         refreshButton.action = #selector(refresh)
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(openFrontendButton)
         container.addSubview(refreshButton)
         NSLayoutConstraint.activate([
             refreshButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
             refreshButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             refreshButton.widthAnchor.constraint(equalToConstant: 74),
-            refreshButton.heightAnchor.constraint(equalToConstant: 26),
-            openFrontendButton.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -6),
-            openFrontendButton.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: Self.rowInset + 2),
-            openFrontendButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            openFrontendButton.widthAnchor.constraint(equalToConstant: 64),
-            openFrontendButton.heightAnchor.constraint(equalToConstant: 26)
+            refreshButton.heightAnchor.constraint(equalToConstant: 26)
         ])
         return container
     }
