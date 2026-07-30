@@ -14,7 +14,6 @@ public struct PopoverPresentation: Equatable, Sendable {
     public let endpointAddress: String?
     public let versionLabel: String?
     public let canOpenFrontend: Bool
-    public let refreshEnabled: Bool
     public enum InstallationProgress: Equatable, Sendable {
         case indeterminate(label: String)
         case determinate(value: Double, label: String)
@@ -39,7 +38,6 @@ public struct PopoverPresentation: Equatable, Sendable {
             endpointAddress: snapshot.endpoint?.webSocketURL.absoluteString,
             versionLabel: versionLabel(snapshot: snapshot),
             canOpenFrontend: canOpenFrontend(snapshot),
-            refreshEnabled: refreshEnabled(snapshot),
             retryInstallationEnabled: isInstallationFailure(snapshot.phase),
             installationProgress: installationProgress(snapshot.phase),
             actionableError: phaseError
@@ -85,13 +83,6 @@ public struct PopoverPresentation: Equatable, Sendable {
         switch snapshot.phase {
         case .ready: return true
         default: return false
-        }
-    }
-
-    private static func refreshEnabled(_ snapshot: ServiceSnapshot) -> Bool {
-        switch snapshot.phase {
-        case .starting, .ready, .restarting: return snapshot.endpoint != nil
-        case .disabled, .installing, .installationFailed, .failed, .stopped: return false
         }
     }
 

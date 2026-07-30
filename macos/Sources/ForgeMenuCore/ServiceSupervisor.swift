@@ -148,19 +148,6 @@ public actor ServiceSupervisor {
         }
     }
 
-    /// Re-probes the running service: verifies it still answers RPCs and
-    /// re-reads the reported SDK version. Independent of lifecycle commands.
-    public func refreshNow() {
-        guard desiredEnabled, !terminating, let client else { return }
-        probeGeneration &+= 1
-        startHealthProbe(
-            client: client,
-            processGeneration: generation,
-            probeGeneration: probeGeneration,
-            initialReadiness: !isReady(snapshot.phase)
-        )
-    }
-
     private func enqueueLifecycle(
         _ operation: @escaping @Sendable (isolated ServiceSupervisor) async -> Void
     ) async {

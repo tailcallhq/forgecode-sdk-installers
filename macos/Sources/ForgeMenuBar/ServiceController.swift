@@ -31,10 +31,6 @@ final class ServiceController {
         }
     }
 
-    func refreshNow() {
-        Task { await supervisor.refreshNow() }
-    }
-
     func retryInstallation() {
         Task { await supervisor.retryInstallation() }
     }

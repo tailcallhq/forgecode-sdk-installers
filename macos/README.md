@@ -54,17 +54,16 @@ Open the DMG, drag **ForgeCode** to **Applications**, then launch it. The app ha
 
 The popover contains:
 
-- a tiny service header with the current service state;
-- a scrollable body;
-- a fixed footer with the port, **Open**, and **Refresh**.
+- a tiny service header with the current service state and the **Open** button;
+- a scrollable body.
 
-The body shows the commands directly: Launch at Login and its approval path, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button. **Refresh** re-probes the running service and re-reads its reported server version.
+The body shows the commands directly: Launch at Login and its approval path, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the header **Open** button.
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
 
 ### Console origin
 
-The footer **Open** link uses this default origin:
+The **Open** link uses this default origin:
 
 ```text
 https://console.forgecode.dev
@@ -96,7 +95,7 @@ forge3 --log-format json ws --addr 127.0.0.1:<first-free-port-from-9753>
 
 The ForgeCode installer does not poll for newer runtimes at app startup or in the background. The app's own lifetime is the desired state: the service is started at launch and stopped on termination. Unexpected exits and readiness failures use bounded exponential restart backoff. Stop and app termination use bounded `TERM`, `KILL`, and child reaping, with best-effort process-group cleanup. The runtime environment is allowlisted instead of copied wholesale, and JSON-aware/text fallback redaction is applied before bounded rotating logs are stored in `~/Library/Logs/ForgeMenuBar/`.
 
-The active app does not poll usage, extensions, models, or providers. Readiness and health are probed with a single one-shot `rpc.discover` request per lifecycle (and again on **Refresh**): a successful round trip marks the service ready, and `result.data.complete["rpc.discover"].info.version` supplies the server version shown in the header. Failures inside the readiness window retry on a short poll interval; persistent failure fails the lifecycle and triggers a supervised restart. Process and probe generations prevent late responses from superseded work from updating current state. Stopping the service clears all service-derived state.
+The active app does not poll usage, extensions, models, or providers. Readiness and health are probed with a single one-shot `rpc.discover` request per lifecycle: a successful round trip marks the service ready, and `result.data.complete["rpc.discover"].info.version` supplies the server version shown in the header. Failures inside the readiness window retry on a short poll interval; persistent failure fails the lifecycle and triggers a supervised restart. Process and probe generations prevent late responses from superseded work from updating current state. Stopping the service clears all service-derived state.
 
 ## Signed release
 

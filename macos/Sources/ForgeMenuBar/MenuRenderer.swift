@@ -25,7 +25,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onWillShow: (() -> Void)?
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
     var onOpenLoginItems: (() -> Void)?
-    var onRefresh: (() -> Void)?
     var onRetryInstallation: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
     var onShowError: ((String) -> Void)?
@@ -41,7 +40,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
     private let openFrontendButton = NSButton()
-    private let refreshButton = NSButton()
     private let installationProgress = NSProgressIndicator()
 
     private var snapshot = ServiceSnapshot()
@@ -100,7 +98,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         root.translatesAutoresizingMaskIntoConstraints = false
 
         let header = buildHeader()
-        let footer = buildFooter()
 
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
@@ -123,7 +120,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
         root.addSubview(header)
         root.addSubview(scrollView)
-        root.addSubview(footer)
 
         NSLayoutConstraint.activate([
             root.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
@@ -135,7 +131,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
@@ -145,11 +141,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             bodyStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             bodyStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            bodyStack.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 46)
+            bodyStack.widthAnchor.constraint(equalToConstant: Self.contentSize.width)
         ])
         return root
     }
@@ -211,27 +203,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return container
     }
 
-    private func buildFooter() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        refreshButton.title = "Refresh"
-        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        refreshButton.imagePosition = .imageLeading
-        refreshButton.bezelStyle = .rounded
-        refreshButton.controlSize = .small
-        refreshButton.target = self
-        refreshButton.action = #selector(refresh)
-        refreshButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(refreshButton)
-        NSLayoutConstraint.activate([
-            refreshButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
-            refreshButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            refreshButton.widthAnchor.constraint(equalToConstant: 74),
-            refreshButton.heightAnchor.constraint(equalToConstant: 26)
-        ])
-        return container
-    }
-
     private func rebuild() {
         presentation = PopoverPresentation.make(snapshot: snapshot)
         statusTitle.stringValue = presentation.serviceTitle
@@ -247,7 +218,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         openFrontendButton.toolTip = presentation.canOpenFrontend
             ? frontendTooltip
             : "The frontend can be opened once the ForgeCode service is running"
-        refreshButton.isEnabled = presentation.refreshEnabled
         rebuildBody()
     }
 
@@ -523,8 +493,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         applyVisibilityEvent(.popoverDidClose)
     }
-
-    @objc private func refresh() { onRefresh?() }
 
     // Toggles keep the popover open so the resulting state change is visible.
     @objc private func toggleLaunchAtLoginCommand() {
