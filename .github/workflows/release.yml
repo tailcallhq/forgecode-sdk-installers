@@ -1,12 +1,27 @@
 name: Release
 
+# One-click release. Building/signing and notarization are DECOUPLED:
+#
+#   1. This workflow (manual, one click) builds + signs the app, builds + signs
+#      the DMG, and submits ONLY the DMG to Apple's notary service WITHOUT
+#      waiting. Nothing user-facing is created here: no GitHub release, no
+#      draft, no public asset. The signed (un-stapled) DMG is stashed as a
+#      private workflow artifact and a tracking issue records the submission.
+#
+#   2. finalize.yml (scheduled cron) polls Apple, and only once the DMG is
+#      Accepted does it staple, build the Sparkle appcast, and CREATE the
+#      GitHub release with the notarized DMG attached. If Apple returns Invalid,
+#      that finalize run fails (red) so CI surfaces the rejection.
+#
+# A normal push to main triggers none of this (see draft.yml for the changelog
+# draft). A release therefore only ever comes into existence with a notarized,
+# stapled DMG already in hand.
 on:
-  push:
-    branches:
-      - main
-  # Dry-run mode: PRs targeting main that carry the `test-release` label run
-  # the full release build, but upload the result as a workflow artifact
-  # instead of touching any GitHub release.
+  # One-button release: Actions -> Release -> Run workflow. No inputs; the
+  # version is read from the release-drafter draft.
+  workflow_dispatch: {}
+  # Dry run: PRs labeled `test-release` run the full build/sign/submit path but
+  # upload only a workflow artifact and never touch a release or the queue.
   pull_request:
     branches:
       - main
@@ -15,112 +30,99 @@ on:
       - reopened
       - synchronize
       - labeled
-  workflow_dispatch: {}
 
 concurrency:
-  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  group: release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'dispatch' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  changes:
-    name: Detect macOS Changes
-    if: github.event_name == 'push'
+  prepare:
+    name: Resolve Release Version
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      macos: ${{ steps.filter.outputs.macos }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Filter paths
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            macos:
-              - "macos/**"
-              - "versions.sh"
-              - ".github/workflows/release.yml"
-
-  draft_release:
-    name: Draft Release
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Draft releases are only visible to a token with push access, so listing
+    # them requires contents: write, not read.
     permissions:
       contents: write
-      pull-requests: write
     outputs:
-      tag_name: ${{ steps.drafter.outputs.tag_name }}
-      release_id: ${{ steps.drafter.outputs.id }}
+      version: ${{ steps.version.outputs.version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+      release_id: ${{ steps.version.outputs.release_id }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Draft Release
-        id: drafter
-        uses: release-drafter/release-drafter@v6
-        with:
-          config-name: release-drafter.yml
+      - name: Resolve version from release-drafter draft
+        id: version
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Dry runs have no drafted release; use a fixed throwaway version.
+            tag="v0.0.0"
+            release_id=""
+          else
+            # Capture the draft's immutable id alongside its tag: finalize.yml
+            # publishes by id so a later release-drafter update that rewrites the
+            # draft's tag/notes cannot cause an empty-notes or duplicate release.
+            draft=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+              --jq 'map(select(.draft)) | sort_by(.created_at) | last | {id, tag_name} | @json' )
+            [ -n "$draft" ] && [ "$draft" != "null" ] \
+              || { echo "error: no draft release found; push to main first so release-drafter can draft one" >&2; exit 1; }
+            tag=$(printf '%s' "$draft" | jq -r '.tag_name // empty')
+            release_id=$(printf '%s' "$draft" | jq -r '.id // empty')
+            [ -n "$tag" ] || { echo "error: draft release has no tag_name" >&2; exit 1; }
+            [ -n "$release_id" ] || { echo "error: draft release has no id" >&2; exit 1; }
+          fi
+          version="${tag#v}"
+          printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            || { echo "error: drafted tag '$tag' is not a strict semver tag" >&2; exit 1; }
+          {
+            echo "version=$version"
+            echo "tag_name=$tag"
+            echo "release_id=$release_id"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::Releasing version $version (tag $tag)"
 
   build_release:
-    name: Build Release DMG
+    name: Build, Sign, and Submit DMG
     needs:
-      - changes
-      - draft_release
-    # Runs when:
-    #   - push to main touching macOS paths (or workflow_dispatch), after a
-    #     successful draft; or
-    #   - a PR into main labeled `test-release` (dry run, bypasses all gates).
-    if: >-
-      !cancelled()
-      && (needs.changes.result == 'success' || needs.changes.result == 'skipped')
-      && (
-        (github.event_name == 'pull_request'
-          && contains(github.event.pull_request.labels.*.name, 'test-release'))
-        || (github.event_name != 'pull_request'
-          && needs.draft_release.result == 'success'
-          && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.macos == 'true'))
-      )
+      - prepare
     runs-on: macos-latest
     timeout-minutes: 45
     permissions:
       contents: read
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
-      appcast: ${{ steps.mode.outputs.appcast }}
       dmg_file: ${{ steps.version.outputs.dmg_file }}
+      submission_id: ${{ steps.submit.outputs.submission_id }}
     env:
       NOTARY_PROFILE: ci-notary
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+      TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
     steps:
       - name: Determine signing mode
         id: mode
         env:
+          EVENT_NAME: ${{ github.event_name }}
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           if [ -n "$MACOS_CERT_P12" ] && [ -n "$MACOS_CERT_PASSWORD" ] \
             && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ] \
             && [ -n "$NOTARY_KEY" ]; then
             echo "mode=signed" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # A real, one-click release must never silently produce an unsigned,
+            # un-notarizable build; that would go green with no release and no
+            # queue entry, giving a false success signal.
+            echo "::error::Apple signing secrets are not configured; a dispatched release cannot be signed or notarized." >&2
+            exit 1
           else
             echo "mode=unsigned" >> "$GITHUB_OUTPUT"
-            echo "::notice::Apple signing secrets are not configured; building an unsigned release."
-          fi
-          if [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
-            echo "appcast=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "appcast=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::SPARKLE_ED_PRIVATE_KEY is not configured; skipping appcast generation (auto-update feed)."
+            echo "::notice::Apple signing secrets are not configured; building an unsigned dry-run DMG (no notarization)."
           fi
 
       - name: Checkout Code
@@ -138,17 +140,13 @@ jobs:
         working-directory: macos
         run: tools/fetch-sparkle.sh
 
-      - name: Derive APP_VERSION from drafted tag
+      - name: Derive build variables
         id: version
         env:
-          # Dry runs have no drafted release; use a fixed throwaway version.
-          TAG_NAME: ${{ github.event_name == 'pull_request' && 'v0.0.0' || needs.draft_release.outputs.tag_name }}
           MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -eu
-          version="${TAG_NAME#v}"
-          printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
-            || { echo "error: drafted tag '$TAG_NAME' is not a strict semver tag" >&2; exit 1; }
+          version="$APP_VERSION"
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
           # Sparkle compares CFBundleVersion, so the build number must increase
           # with every published release; the release semver satisfies that.
@@ -201,12 +199,23 @@ jobs:
             --issuer "$NOTARY_ISSUER_ID"
           rm -f "$key_file"
 
-      - name: Build, sign, and notarize release
+      - name: Build, sign, and submit release for notarization
+        id: submit
         if: steps.mode.outputs.mode == 'signed'
         working-directory: macos
         env:
           SIGNING_TEAM_ID: ${{ secrets.SIGNING_TEAM_ID }}
-        run: scripts/release.sh
+          # PR dry runs build and sign the full release but must NOT enqueue a
+          # real Apple submission that nothing will ever poll or staple.
+          SKIP_NOTARY_SUBMIT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+        run: |
+          set -eu
+          scripts/release.sh
+          if [ "${SKIP_NOTARY_SUBMIT:-0}" != "1" ]; then
+            submission_id=$(tr -d '[:space:]' < "dist/signed/$DMG_NAME.notary-submission-id")
+            [ -n "$submission_id" ] || { echo "error: submission id was not recorded" >&2; exit 1; }
+            echo "submission_id=$submission_id" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build unsigned release
         if: steps.mode.outputs.mode == 'unsigned'
@@ -214,43 +223,6 @@ jobs:
         env:
           BUILD_FLAVOR: unsigned
         run: scripts/package-unsigned.sh
-
-      - name: Generate appcast
-        if: steps.mode.outputs.appcast == 'true'
-        env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-          TAG_NAME: ${{ github.event_name == 'pull_request' && 'v0.0.0' || needs.draft_release.outputs.tag_name }}
-          MODE: ${{ steps.mode.outputs.mode }}
-        run: |
-          set -eu
-          dist="macos/dist/$MODE"
-          dmg="$dist/$DMG_NAME.dmg"
-          signature=$(echo "$SPARKLE_ED_PRIVATE_KEY" \
-            | ./macos/Vendor/Sparkle/bin/sign_update --ed-key-file - -p "$dmg")
-          length=$(stat -f %z "$dmg")
-          download_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$DMG_NAME.dmg"
-          minimum_macos=$(sed -n 's/^minimum_macos=//p' "$dist/manifest.txt")
-          published=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
-          cat > "$dist/appcast.xml" <<XML
-          <?xml version="1.0" encoding="utf-8"?>
-          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-            <channel>
-              <title>ForgeCode</title>
-              <item>
-                <title>ForgeCode $APP_VERSION</title>
-                <link>https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG_NAME</link>
-                <sparkle:version>$BUILD_NUMBER</sparkle:version>
-                <sparkle:shortVersionString>$APP_VERSION</sparkle:shortVersionString>
-                <sparkle:minimumSystemVersion>$minimum_macos</sparkle:minimumSystemVersion>
-                <pubDate>$published</pubDate>
-                <enclosure url="$download_url" type="application/octet-stream" length="$length" sparkle:edSignature="$signature" />
-              </item>
-            </channel>
-          </rss>
-          XML
-          # Strip the heredoc indentation so the XML declaration is at column 0.
-          sed -i '' 's/^          //' "$dist/appcast.xml"
-          xmllint --noout "$dist/appcast.xml"
 
       - name: Stage release artifacts
         env:
@@ -260,15 +232,15 @@ jobs:
           dist="macos/dist/$MODE"
           rm -rf release-artifacts
           mkdir -p release-artifacts
-          # Only the DMG and the Sparkle feed are published. manifest.txt and
-          # SHA256SUMS stay build-internal: they are inputs to
-          # verify-release.sh, which has already run against this build, and
-          # SHA256SUMS mostly hashes files *inside* the bundle, which a
-          # downloader cannot check without mounting the DMG first. GitHub
-          # exposes a SHA-256 digest for every release asset anyway.
+          # The signed-but-un-stapled DMG plus everything finalize.yml needs to
+          # poll, staple, build the appcast, and verify: the submission id, the
+          # manifest (for minimum_macos), and the checksums.
           cp "$dist/$DMG_NAME.dmg" release-artifacts/
-          if [ -f "$dist/appcast.xml" ]; then
-            cp "$dist/appcast.xml" release-artifacts/
+          cp "$dist/manifest.txt" release-artifacts/
+          [ -f "$dist/SHA256SUMS" ] && cp "$dist/SHA256SUMS" release-artifacts/ || true
+          # The submission id exists only for a real (non-dry-run) signed build.
+          if [ -f "$dist/$DMG_NAME.notary-submission-id" ]; then
+            cp "$dist/$DMG_NAME.notary-submission-id" release-artifacts/
           fi
 
       - name: Upload staged artifacts
@@ -278,6 +250,10 @@ jobs:
           name: release-macos
           path: release-artifacts/*
           if-no-files-found: error
+          # Long enough that a slow/stuck Apple notarization cannot strand the
+          # DMG before finalize.yml downloads it. Apple normally finishes in
+          # minutes; this is a wide safety margin.
+          retention-days: 30
 
       - name: Report dry-run artifact
         if: github.event_name == 'pull_request'
@@ -293,7 +269,7 @@ jobs:
             echo "- DMG: \`$DMG_NAME.dmg\`"
             echo "- Artifact: $ARTIFACT_URL"
             echo ""
-            echo "No release was created or modified."
+            echo "No release was created, and nothing was submitted to the notarization queue."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up keychain
@@ -303,55 +279,67 @@ jobs:
             security delete-keychain "$RELEASE_KEYCHAIN"
           fi
 
-  upload_release_artifacts:
-    name: Upload Release Artifacts
+  queue_notarization:
+    name: Queue Notarization
     needs:
-      - draft_release
+      - prepare
       - build_release
+    # Only real releases (workflow_dispatch) with a signed submission enter the
+    # queue. PR dry runs and unsigned builds never touch the queue.
     if: >-
-      !cancelled()
-      && github.event_name != 'pull_request'
-      && needs.draft_release.result == 'success'
+      github.event_name == 'workflow_dispatch'
       && needs.build_release.result == 'success'
+      && needs.build_release.outputs.mode == 'signed'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      issues: write
     env:
-      TAG_NAME: ${{ needs.draft_release.outputs.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
       DMG_FILE: ${{ needs.build_release.outputs.dmg_file }}
-      HAS_APPCAST: ${{ needs.build_release.outputs.appcast }}
+      SUBMISSION_ID: ${{ needs.build_release.outputs.submission_id }}
+      RUN_ID: ${{ github.run_id }}
     steps:
-      - name: Download staged artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-macos
-          path: release-artifacts
+      - name: Ensure notarization-pending label exists
+        run: |
+          gh label create notarization-pending \
+            --repo "$GITHUB_REPOSITORY" \
+            --description "A signed DMG is awaiting Apple notarization" \
+            --color FBCA04 2>/dev/null || true
 
-      - name: Validate complete artifact set
+      - name: Open tracking issue (pending queue marker)
         run: |
           set -euo pipefail
-          cd release-artifacts
-          expected=(
-            "$DMG_FILE"
-          )
-          if [ "$HAS_APPCAST" = "true" ]; then
-            expected+=("appcast.xml")
-          fi
-          for file in "${expected[@]}"; do
-            test -f "$file" || { echo "missing expected artifact: $file" >&2; exit 1; }
-          done
-          actual_count=$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')
-          expected_count=${#expected[@]}
-          if [ "$actual_count" != "$expected_count" ]; then
-            echo "expected $expected_count artifacts, found $actual_count" >&2
-            find . -maxdepth 1 -type f -print | sort >&2
-            exit 1
-          fi
+          # The tracking issue is the durable, queryable hand-off between this
+          # build and the scheduled finalize workflow. Its JSON block is the
+          # source of truth the poller reads.
+          body=$(cat <<EOF
+          Automated notarization tracker. Do not edit the JSON block — the
+          scheduled \`finalize.yml\` workflow reads it to poll Apple, staple the
+          DMG, and publish the release once notarization is accepted.
 
-      - name: Upload artifacts to draft release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          find release-artifacts -maxdepth 1 -type f -print0 \
-            | xargs -0 gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --clobber
+          <!-- notary-queue
+          {
+            "tag_name": "$TAG_NAME",
+            "version": "$VERSION",
+            "release_id": "$RELEASE_ID",
+            "dmg_file": "$DMG_FILE",
+            "submission_id": "$SUBMISSION_ID",
+            "build_run_id": "$RUN_ID"
+          }
+          notary-queue -->
+
+          - Tag: \`$TAG_NAME\`
+          - Submission: \`$SUBMISSION_ID\`
+          - Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID
+          EOF
+          )
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Notarization pending: $TAG_NAME" \
+            --label notarization-pending \
+            --body "$body"
+          echo "::notice::Queued $TAG_NAME for notarization (submission $SUBMISSION_ID). finalize.yml will publish once Apple accepts it."

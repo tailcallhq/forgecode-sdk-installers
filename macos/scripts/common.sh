@@ -47,6 +47,11 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$DMG_NAME.dmg"
 MANIFEST_PATH="$DIST_DIR/manifest.txt"
 CHECKSUMS_PATH="$DIST_DIR/SHA256SUMS"
+# The notary submission UUID is written next to the DMG so it travels with the
+# release artifact: scripts/submit-dmg.sh records it and the decoupled
+# scripts/staple-dmg.sh (driven by the scheduled finalize workflow) reads it to
+# poll Apple for the result without re-submitting.
+SUBMISSION_ID_PATH="$DIST_DIR/$DMG_NAME.notary-submission-id"
 NOTARIZATION_LOG_DIR="$ARTIFACTS_DIR/notarization-logs"
 
 fail() {
@@ -903,8 +908,17 @@ verify_signed_app() {
   app=$1
   [ "$(signature_kind "$app")" = "developer-id" ] || fail "app is not signed with a Developer ID Application identity"
   codesign --verify --deep --strict --verbose=2 "$app"
-  xcrun stapler validate "$app"
-  spctl --assess --type execute --verbose=4 "$app"
+  # Only the DMG is submitted for notarization; submitting it notarizes the app
+  # inside recursively, but the app bundle itself is never individually
+  # stapled. A notarization ticket therefore lives on the DMG, not the app, so
+  # stapler/spctl assessment of the app is asserted only when the caller
+  # explicitly expects a stapled bundle (EXPECT_STAPLED_APP=1), which the
+  # release pipeline never does.
+  if [ "${EXPECT_STAPLED_APP:-0}" = "1" ]; then
+    require_command spctl
+    xcrun stapler validate "$app"
+    spctl --assess --type execute --verbose=4 "$app"
+  fi
   if [ -n "${SIGNING_TEAM_ID:-}" ]; then
     actual_team=$(codesign -dv --verbose=4 "$app" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
     [ "$actual_team" = "$SIGNING_TEAM_ID" ] \

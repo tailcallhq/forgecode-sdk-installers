@@ -83,8 +83,15 @@ if [ -f "$DMG_PATH" ]; then
   if [ "$BUILD_FLAVOR" = "signed" ]; then
     [ "$(signature_kind "$DMG_PATH")" = "developer-id" ] || fail "DMG is not Developer ID signed"
     codesign --verify --strict --verbose=2 "$DMG_PATH"
-    xcrun stapler validate "$DMG_PATH"
-    spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
+    # The DMG is signed during the build but notarized/stapled later, in a
+    # decoupled step (scripts/staple-dmg.sh via the finalize workflow). The
+    # notarization ticket and Gatekeeper acceptance are therefore asserted only
+    # once the caller declares the DMG should already be stapled.
+    if [ "${EXPECT_STAPLED_DMG:-0}" = "1" ]; then
+      require_command spctl
+      xcrun stapler validate "$DMG_PATH"
+      spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
+    fi
   else
     [ "$(signature_kind "$DMG_PATH")" = "none" ] || fail "unsigned DMG must not carry a code signature"
   fi

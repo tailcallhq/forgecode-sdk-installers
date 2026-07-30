@@ -1,0 +1,34 @@
+name: Draft Release Notes
+
+# Keep the release-drafter draft (next version + changelog) current on every
+# push to main. This builds nothing, signs nothing, and notarizes nothing: it
+# only maintains the draft notes that the one-click Release workflow reads when
+# a human decides to ship. No macOS runner, no Apple round trip.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+concurrency:
+  group: draft-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  draft:
+    name: Update Draft Release Notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Draft Release Notes
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

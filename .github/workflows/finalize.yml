@@ -1,0 +1,277 @@
+name: Finalize Release
+
+# Scheduled poller that finishes the decoupled notarization started by
+# release.yml. For each open `notarization-pending` tracking issue it asks Apple
+# for the submission status:
+#
+#   In Progress -> do nothing; the next cron tick checks again.
+#   Accepted    -> staple the DMG, build the Sparkle appcast, CREATE the GitHub
+#                  release with the notarized DMG + appcast attached, then close
+#                  the tracking issue.
+#   Invalid     -> comment the notary log on the issue and FAIL the run (red) so
+#                  the rejection surfaces in CI. No release is created.
+#
+# The release only ever comes into existence in the Accepted branch, so a
+# published release always has a notarized, stapled DMG.
+on:
+  schedule:
+    # Every 15 minutes. A cheap Ubuntu gate skips the macOS runner entirely when
+    # nothing is pending, so an idle queue costs almost nothing.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: finalize-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan Notarization Queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: read
+    outputs:
+      pending: ${{ steps.scan.outputs.pending }}
+      matrix: ${{ steps.scan.outputs.matrix }}
+    steps:
+      - name: Find pending tracking issues
+        id: scan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          issues=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --label notarization-pending \
+            --state open \
+            --json number \
+            --jq '[.[].number]')
+          count=$(printf '%s' "$issues" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"issue\":[]}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Notarization queue is empty; nothing to finalize."
+          else
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"issue\":$issues}" >> "$GITHUB_OUTPUT"
+            echo "::notice::$count release(s) pending notarization."
+          fi
+
+  finalize:
+    name: Finalize (issue #${{ matrix.issue }})
+    needs: scan
+    if: needs.scan.outputs.pending == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      # Required for `gh run download` to fetch the build job's artifact from
+      # the separate release.yml run.
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.scan.outputs.matrix) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NOTARY_PROFILE: ci-notary
+      ISSUE_NUMBER: ${{ matrix.issue }}
+    steps:
+      - name: Read tracking issue
+        id: marker
+        run: |
+          set -euo pipefail
+          body=$(gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          json=$(printf '%s' "$body" | awk '/<!-- notary-queue/{flag=1;next}/notary-queue -->/{flag=0}flag')
+          [ -n "$json" ] || { echo "error: issue #$ISSUE_NUMBER has no notary-queue marker" >&2; exit 1; }
+          for key in tag_name version release_id dmg_file submission_id build_run_id; do
+            value=$(printf '%s' "$json" | jq -r ".$key // empty")
+            [ -n "$value" ] || { echo "error: marker is missing $key" >&2; exit 1; }
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done
+          # Derive the DMG basename (no .dmg) from the marker so a future signed
+          # build suffix cannot silently diverge from what finalize expects.
+          dmg_name=$(printf '%s' "$json" | jq -r '.dmg_file')
+          dmg_name="${dmg_name%.dmg}"
+          echo "dmg_name=$dmg_name" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Vendor Sparkle (pinned checksum)
+        working-directory: macos
+        run: tools/fetch-sparkle.sh
+
+      - name: Download build artifact
+        env:
+          BUILD_RUN_ID: ${{ steps.marker.outputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p macos/dist/signed
+          gh run download "$BUILD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name release-macos \
+            --dir macos/dist/signed
+
+      - name: Store notarization credentials
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -eu
+          key_file="$RUNNER_TEMP/notary-key.p8"
+          printf '%s\n' "$NOTARY_KEY" > "$key_file"
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --key "$key_file" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID"
+          rm -f "$key_file"
+
+      - name: Poll and staple
+        id: staple
+        working-directory: macos
+        env:
+          APP_VERSION: ${{ steps.marker.outputs.version }}
+          BUILD_NUMBER: ${{ steps.marker.outputs.version }}
+          DMG_NAME: ${{ steps.marker.outputs.dmg_name }}
+          SUBMISSION_ID: ${{ steps.marker.outputs.submission_id }}
+        run: |
+          set +e
+          BUILD_FLAVOR=signed scripts/staple-dmg.sh
+          rc=$?
+          set -e
+          # staple-dmg.sh exit codes: 0 accepted, 75 not-yet-terminal (retry),
+          # 1 definite Apple rejection, >1 local/infra error.
+          if [ "$rc" -eq 0 ]; then
+            echo "state=accepted" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 75 ]; then
+            echo "state=in_progress" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 1 ]; then
+            echo "state=rejected" >> "$GITHUB_OUTPUT"
+            exit 1
+          else
+            echo "state=error" >> "$GITHUB_OUTPUT"
+            exit "$rc"
+          fi
+
+      - name: Still in progress
+        if: steps.staple.outputs.state == 'in_progress'
+        run: echo "::notice::Notarization for ${{ steps.marker.outputs.tag_name }} is still in progress; will retry next tick."
+
+      - name: Generate appcast
+        if: steps.staple.outputs.state == 'accepted'
+        working-directory: macos
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAG_NAME: ${{ steps.marker.outputs.tag_name }}
+          APP_VERSION: ${{ steps.marker.outputs.version }}
+          BUILD_NUMBER: ${{ steps.marker.outputs.version }}
+          DMG_NAME: ${{ steps.marker.outputs.dmg_name }}
+        run: |
+          set -eu
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            # Publishing without an appcast would ship a release that existing
+            # clients can never auto-update to; fail instead of silently
+            # skipping so the gap is visible.
+            echo "::error::SPARKLE_ED_PRIVATE_KEY is not configured; cannot generate the Sparkle appcast required for auto-update." >&2
+            exit 1
+          fi
+          dist="dist/signed"
+          dmg="$dist/$DMG_NAME.dmg"
+          # The DMG is now stapled, so the signature and length must be computed
+          # over the final, notarized bytes.
+          signature=$(echo "$SPARKLE_ED_PRIVATE_KEY" \
+            | ./Vendor/Sparkle/bin/sign_update --ed-key-file - -p "$dmg")
+          length=$(stat -f %z "$dmg")
+          download_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$DMG_NAME.dmg"
+          minimum_macos=$(sed -n 's/^minimum_macos=//p' "$dist/manifest.txt")
+          published=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
+          cat > "$dist/appcast.xml" <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>ForgeCode</title>
+              <item>
+                <title>ForgeCode $APP_VERSION</title>
+                <link>$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG_NAME</link>
+                <sparkle:version>$BUILD_NUMBER</sparkle:version>
+                <sparkle:shortVersionString>$APP_VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>$minimum_macos</sparkle:minimumSystemVersion>
+                <pubDate>$published</pubDate>
+                <enclosure url="$download_url" type="application/octet-stream" length="$length" sparkle:edSignature="$signature" />
+              </item>
+            </channel>
+          </rss>
+          XML
+          # Strip the heredoc indentation so the XML declaration is at column 0.
+          sed -i '' 's/^          //' "$dist/appcast.xml"
+          xmllint --noout "$dist/appcast.xml"
+
+      - name: Create release with notarized DMG
+        if: steps.staple.outputs.state == 'accepted'
+        env:
+          TAG_NAME: ${{ steps.marker.outputs.tag_name }}
+          VERSION: ${{ steps.marker.outputs.version }}
+          RELEASE_ID: ${{ steps.marker.outputs.release_id }}
+          DMG_NAME: ${{ steps.marker.outputs.dmg_name }}
+        run: |
+          set -euo pipefail
+          dist="macos/dist/signed"
+          [ -f "$dist/$DMG_NAME.dmg" ] || { echo "error: stapled DMG is missing: $dist/$DMG_NAME.dmg" >&2; exit 1; }
+          # The appcast is mandatory: the previous step fails the run if the
+          # Sparkle key is absent, so its absence here is a hard error.
+          [ -f "$dist/appcast.xml" ] || { echo "error: appcast.xml was not generated" >&2; exit 1; }
+          assets=("$dist/$DMG_NAME.dmg" "$dist/appcast.xml")
+
+          # Operate on the SAME draft the build captured, addressed by its
+          # immutable id. release-drafter keeps rewriting the newest draft as
+          # main moves, so resolving by tag string could grab the wrong (or a
+          # newer, empty) draft or create a duplicate.
+          #
+          # gh release commands resolve a draft by its tag_name field (a draft
+          # needs no git ref for this), so upload the assets while the release
+          # is still a draft, then flip exactly that release to public by id.
+          # This edit is the FIRST and only moment the release becomes visible,
+          # and the notarized+stapled DMG is already attached when it does.
+          gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+          notes=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.body // ""')
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f tag_name="$TAG_NAME" \
+            -f name="$VERSION" \
+            -f body="$notes" \
+            -F draft=false >/dev/null
+          echo "::notice::Published release $TAG_NAME with a notarized, stapled DMG."
+
+      - name: Close tracking issue
+        if: steps.staple.outputs.state == 'accepted'
+        env:
+          TAG_NAME: ${{ steps.marker.outputs.tag_name }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "✅ Notarization accepted; published release **$TAG_NAME** with the stapled DMG."
+          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --reason completed
+
+      - name: Report rejection on the tracking issue
+        # Only a definite Apple rejection reaches here (staple exit 1). Local
+        # errors (state=error) fail the run WITHOUT touching the issue, so the
+        # next cron tick retries them. A rejection is terminal, so relabel the
+        # issue off the pending queue to stop the scanner re-running it (and
+        # failing red) every 15 minutes.
+        if: failure() && steps.staple.outputs.state == 'rejected'
+        env:
+          TAG_NAME: ${{ steps.marker.outputs.tag_name }}
+        run: |
+          gh label create notarization-failed \
+            --repo "$GITHUB_REPOSITORY" \
+            --description "Apple rejected notarization for this release" \
+            --color B60205 2>/dev/null || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --remove-label notarization-pending \
+            --add-label notarization-failed || true
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "❌ Notarization was **rejected** for $TAG_NAME. See the failed finalize run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. No release was created. Fix the issue and dispatch a new release; this tracker has been moved off the pending queue." || true
