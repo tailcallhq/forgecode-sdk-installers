@@ -27,7 +27,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onOpenLoginItems: (() -> Void)?
     var onRefresh: (() -> Void)?
     var onRetryInstallation: (() -> Void)?
-    var onOpenLogs: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
     var onShowError: ((String) -> Void)?
     var onCheckForUpdates: (() -> Void)?
@@ -294,11 +293,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
         bodyStack.addArrangedSubview(commandRow(
-            title: "Open Logs",
-            symbol: "doc.text",
-            action: #selector(openLogsCommand)
-        ))
-        bodyStack.addArrangedSubview(commandRow(
             title: "Check for Updates…",
             symbol: "arrow.down.circle",
             action: #selector(checkForUpdatesCommand)
@@ -541,7 +535,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
-    @objc private func openLogsCommand() { close(); onOpenLogs?() }
     @objc private func checkForUpdatesCommand() { close(); onCheckForUpdates?() }
     @objc private func openFrontendCommand() { close(); onOpenFrontend?() }
     @objc private func showErrorCommand() {
