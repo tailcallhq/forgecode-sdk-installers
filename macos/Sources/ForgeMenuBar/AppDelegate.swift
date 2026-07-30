@@ -169,7 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
         let checkForUpdates = NSMenuItem(
-            title: "Check for Updates…",
+            title: "Check for Updates",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )

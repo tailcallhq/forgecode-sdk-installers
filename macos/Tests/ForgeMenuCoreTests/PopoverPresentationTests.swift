@@ -72,7 +72,7 @@ final class PopoverPresentationTests: XCTestCase {
             endpoint: LoopbackEndpoint(port: 50_001),
             conversationStreamState: .connecting
         ))
-        XCTAssertEqual(connecting.conversationsSummary, "Connecting…")
+        XCTAssertEqual(connecting.conversationsSummary, "Connecting")
     }
 
     func testConversationsCannotExpandWhileServiceIsOff() {
@@ -137,7 +137,7 @@ final class PopoverPresentationTests: XCTestCase {
             conversationStreamState: .connecting
         ))
         XCTAssertEqual(connecting.serviceDetail, "Starting")
-        XCTAssertEqual(connecting.bodyMessage, "Connecting…")
+        XCTAssertEqual(connecting.bodyMessage, "Connecting")
         XCTAssertEqual(connecting.serviceTone, .active)
         XCTAssertTrue(connecting.refreshEnabled)
 
@@ -148,7 +148,7 @@ final class PopoverPresentationTests: XCTestCase {
             streamError: "socket closed"
         ))
         XCTAssertEqual(reconnecting.serviceDetail, "Reconnecting")
-        XCTAssertEqual(reconnecting.bodyMessage, "Connecting…")
+        XCTAssertEqual(reconnecting.bodyMessage, "Connecting")
         XCTAssertEqual(reconnecting.actionableError, "socket closed")
         XCTAssertEqual(reconnecting.serviceTone, .warning)
 
@@ -178,7 +178,7 @@ final class PopoverPresentationTests: XCTestCase {
             XCTAssertEqual(presentation.serviceTone, .active)
             XCTAssertFalse(presentation.refreshEnabled)
             XCTAssertFalse(presentation.canOpenFrontend)
-            XCTAssertEqual(presentation.conversationsSummary, "Installing…")
+            XCTAssertEqual(presentation.conversationsSummary, "Installing")
         }
 
         XCTAssertEqual(
@@ -263,7 +263,7 @@ final class PopoverPresentationTests: XCTestCase {
         ))
         XCTAssertEqual(presentation.serviceTitle, "ForgeCode")
         XCTAssertEqual(presentation.serviceDetail, "Reconnecting")
-        XCTAssertEqual(presentation.bodyMessage, "Connecting…")
+        XCTAssertEqual(presentation.bodyMessage, "Connecting")
         XCTAssertEqual(presentation.actionableError, longError)
     }
 }

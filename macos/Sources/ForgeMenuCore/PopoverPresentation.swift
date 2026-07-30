@@ -54,7 +54,7 @@ public struct PopoverPresentation: Equatable, Sendable {
             case .ready:
                 switch snapshot.conversationStreamState {
                 case .subscribed: bodyMessage = "No active conversations"
-                case .connecting, .reconnecting: bodyMessage = "Connecting…"
+                case .connecting, .reconnecting: bodyMessage = "Connecting"
                 case .disconnected: bodyMessage = "Conversations unavailable"
                 }
             case .installing(let phase):
@@ -62,7 +62,7 @@ public struct PopoverPresentation: Equatable, Sendable {
             case .installationFailed:
                 bodyMessage = "Runtime installation failed"
             case .starting, .restarting:
-                bodyMessage = "Connecting…"
+                bodyMessage = "Connecting"
             case .failed:
                 bodyMessage = "Conversations unavailable"
             case .disabled, .stopped:
@@ -142,12 +142,12 @@ public struct PopoverPresentation: Equatable, Sendable {
         case .ready:
             switch snapshot.conversationStreamState {
             case .subscribed: return "None running"
-            case .connecting, .reconnecting: return "Connecting…"
+            case .connecting, .reconnecting: return "Connecting"
             case .disconnected: return "Unavailable"
             }
-        case .installing: return "Installing…"
+        case .installing: return "Installing"
         case .installationFailed: return "Unavailable"
-        case .starting, .restarting: return "Connecting…"
+        case .starting, .restarting: return "Connecting"
         case .failed: return "Unavailable"
         case .disabled, .stopped: return "Off"
         }
@@ -242,11 +242,11 @@ public struct PopoverPresentation: Equatable, Sendable {
 
     private static func installationBodyMessage(_ phase: RuntimeInstallationPhase) -> String {
         switch phase {
-        case .resolving: return "Finding the ForgeCode runtime…"
-        case .downloading: return "Downloading the ForgeCode runtime…"
-        case .verifying: return "Verifying the downloaded runtime…"
-        case .installing: return "Installing the ForgeCode runtime…"
-        case .ready: return "Starting the ForgeCode service…"
+        case .resolving: return "Finding the ForgeCode runtime"
+        case .downloading: return "Downloading the ForgeCode runtime"
+        case .verifying: return "Verifying the downloaded runtime"
+        case .installing: return "Installing the ForgeCode runtime"
+        case .ready: return "Starting the ForgeCode service"
         }
     }
 

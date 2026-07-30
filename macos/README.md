@@ -62,7 +62,7 @@ The body shows the commands directly: a **Conversations** disclosure row followe
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
 
-Selecting **Conversations** expands the list in place; the row summarises the current state (`3 running`, `None running`, `Connecting…`) and is inert while the service is not running. A back row returns to the commands, and closing the popover always resets to the commands view.
+Selecting **Conversations** expands the list in place; the row summarises the current state (`3 running`, `None running`, `Connecting`) and is inert while the service is not running. A back row returns to the commands, and closing the popover always resets to the commands view.
 
 Only root conversations whose SDK status is exactly `running` appear. Titles come from the string `variables.title`, are trimmed, and fall back to **Untitled**. Selecting a row opens that conversation in the default browser.
 
