@@ -58,7 +58,7 @@ The popover contains:
 - a scrollable body;
 - a fixed footer with the port, **Open**, and **Refresh**.
 
-The body shows the commands directly: Launch at Login and its approval path, Open Logs, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button. **Refresh** re-probes the running service and re-reads its reported server version.
+The body shows the commands directly: Launch at Login and its approval path, error details when present, and Quit ForgeCode. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the footer **Open** button. **Refresh** re-probes the running service and re-reads its reported server version.
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
 
