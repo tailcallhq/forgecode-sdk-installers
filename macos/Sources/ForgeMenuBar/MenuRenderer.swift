@@ -41,7 +41,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let statusIcon = NSImageView()
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
-    private let endpointLabel = NSTextField(labelWithString: "")
     private let openFrontendButton = NSButton()
     private let refreshButton = NSButton()
     private let installationProgress = NSProgressIndicator()
@@ -216,12 +215,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private func buildFooter() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
-        endpointLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        endpointLabel.textColor = .secondaryLabelColor
-        endpointLabel.lineBreakMode = .byTruncatingMiddle
-        endpointLabel.maximumNumberOfLines = 1
-        endpointLabel.isSelectable = true
-        endpointLabel.translatesAutoresizingMaskIntoConstraints = false
         refreshButton.title = "Refresh"
         refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
         refreshButton.imagePosition = .imageLeading
@@ -230,12 +223,8 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         refreshButton.target = self
         refreshButton.action = #selector(refresh)
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(endpointLabel)
         container.addSubview(refreshButton)
         NSLayoutConstraint.activate([
-            endpointLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset + 2),
-            endpointLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            endpointLabel.trailingAnchor.constraint(lessThanOrEqualTo: refreshButton.leadingAnchor, constant: -6),
             refreshButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
             refreshButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             refreshButton.widthAnchor.constraint(equalToConstant: 74),
@@ -255,8 +244,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         statusIcon.contentTintColor = statusColor(for: presentation.serviceTone)
         statusVersion.stringValue = presentation.versionLabel ?? ""
         statusVersion.isHidden = presentation.versionLabel == nil
-        endpointLabel.stringValue = presentation.endpointPortLabel ?? "Not running"
-        endpointLabel.toolTip = presentation.endpointTooltip
         openFrontendButton.isEnabled = presentation.canOpenFrontend
         openFrontendButton.toolTip = presentation.canOpenFrontend
             ? frontendTooltip
