@@ -247,7 +247,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         ))
         if loginItemState == .requiresApproval {
             bodyStack.addArrangedSubview(commandRow(
-                title: "Approve in Login Items…",
+                title: "Approve in Login Items",
                 symbol: "exclamationmark.triangle",
                 action: #selector(openLoginItemsCommand)
             ))
@@ -255,13 +255,13 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
         bodyStack.addArrangedSubview(commandRow(
-            title: "Check for Updates…",
+            title: "Check for Updates",
             symbol: "arrow.down.circle",
             action: #selector(checkForUpdatesCommand)
         ))
         if presentation.actionableError != nil {
             bodyStack.addArrangedSubview(commandRow(
-                title: "Show Error Details…",
+                title: "Show Error Details",
                 symbol: "exclamationmark.triangle.fill",
                 action: #selector(showErrorCommand)
             ))
