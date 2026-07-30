@@ -47,7 +47,7 @@ public struct PopoverPresentation: Equatable, Sendable {
     ) -> (title: String, detail: String, tone: ServiceTone) {
         switch snapshot.phase {
         case .ready:
-            return ("ForgeCode", "Running", .normal)
+            return ("ForgeCode", "", .normal)
         case .installing(let phase):
             return ("ForgeCode", installationDetail(phase), .active)
         case .installationFailed:

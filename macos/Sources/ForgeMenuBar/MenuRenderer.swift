@@ -12,12 +12,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     // Sized so the steady-state command list fits snugly without scrolling:
-    // header (56) + body (6 top inset + four 28pt rows + one 13pt group spacer
-    // + 4pt inter-row spacing + 8 bottom inset = 143) = 199, plus a small
+    // header (56) + body (6 top inset + three 28pt rows + one 13pt group spacer
+    // + 3pt inter-row spacing + 8 bottom inset = 114) = 170, plus a small
     // margin. Transient states with an extra row (login-item approval, error
     // details) overflow into the scroll view within this same fixed frame.
-    static let contentSize = NSSize(width: 288, height: 204)
-    private static let bodyContentWidth: CGFloat = 280
+    static let contentSize = NSSize(width: 260, height: 175)
+    private static let bodyContentWidth: CGFloat = 252
     /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 10
     /// Left edge of the label column, so notes line up under row titles.
@@ -29,7 +29,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
     var onOpenLoginItems: (() -> Void)?
     var onRetryInstallation: (() -> Void)?
-    var onOpenLogs: (() -> Void)?
     var onOpenFrontend: (() -> Void)?
     var onShowError: ((String) -> Void)?
     var onCheckForUpdates: (() -> Void)?
@@ -246,11 +245,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
         bodyStack.addArrangedSubview(commandRow(
-            title: "Open Logs",
-            symbol: "doc.text",
-            action: #selector(openLogsCommand)
-        ))
-        bodyStack.addArrangedSubview(commandRow(
             title: "Check for Updates",
             symbol: "arrow.down.circle",
             action: #selector(checkForUpdatesCommand)
@@ -264,7 +258,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         }
         bodyStack.addArrangedSubview(groupSpacer())
         bodyStack.addArrangedSubview(commandRow(
-            title: "Quit ForgeCode",
+            title: "Quit",
             symbol: "power",
             action: #selector(quitCommand),
             trailingText: "⌘Q"
@@ -491,7 +485,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     // Actions that hand off to another app or window dismiss the popover first.
     @objc private func openLoginItemsCommand() { close(); onOpenLoginItems?() }
-    @objc private func openLogsCommand() { close(); onOpenLogs?() }
     @objc private func checkForUpdatesCommand() { close(); onCheckForUpdates?() }
     @objc private func openFrontendCommand() { close(); onOpenFrontend?() }
     @objc private func showErrorCommand() {

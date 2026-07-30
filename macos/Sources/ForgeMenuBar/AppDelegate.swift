@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
             popoverController = PopoverController()
-            wireActions(paths: paths)
+            wireActions()
             serviceController.onSnapshotChanged = { [weak self] snapshot in
                 guard let self else { return }
                 self.popoverController.update(snapshot: snapshot, loginItemState: self.loginItemState)
@@ -99,21 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    private func wireActions(paths: RuntimePaths) {
+    private func wireActions() {
         popoverController.onWillShow = { [weak self] in self?.synchronizeLoginPreference() }
         popoverController.onLaunchAtLoginChanged = { [weak self] enabled in
             self?.setLaunchAtLogin(enabled)
         }
         popoverController.onOpenLoginItems = { [weak self] in self?.openLoginItemsSettings() }
         popoverController.onRetryInstallation = { [weak self] in self?.serviceController.retryInstallation() }
-        popoverController.onOpenLogs = { [weak self] in
-            do {
-                try FileManager.default.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(paths.logsDirectory)
-            } catch {
-                self?.presentActionError(title: "Logs could not be opened", error: error)
-            }
-        }
         popoverController.onOpenFrontend = { [weak self] in
             self?.openFrontend()
         }
@@ -156,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(checkForUpdates)
         appMenu.addItem(.separator())
         let quit = NSMenuItem(
-            title: "Quit ForgeCode",
+            title: "Quit",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
