@@ -11,19 +11,15 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         case unavailable(String)
     }
 
-    // Sized so the steady-state command list fits snugly without scrolling:
-    // header (56) + body (6 top inset + three 28pt rows + one 13pt group spacer
-    // + 3pt inter-row spacing + 8 bottom inset = 114) = 170, plus a small
-    // margin. Transient states with an extra row (login-item approval, error
-    // details) overflow into the scroll view within this same fixed frame.
-    static let contentSize = NSSize(width: 260, height: 175)
+    // Sized so the steady-state text list fits snugly without scrolling.
+    // Transient states with extra rows or details overflow into the scroll view
+    // within this same fixed frame.
+    static let contentSize = NSSize(width: 260, height: 146)
     private static let bodyContentWidth: CGFloat = 252
     /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 10
-    /// Left edge of the label column, so notes line up under row titles.
+    /// Left edge shared by command titles and supporting notes.
     private static let labelColumnInset = rowInset
-        + CommandRowView.iconColumnWidth
-        + CommandRowView.iconToLabelGap
 
     var onWillShow: (() -> Void)?
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
@@ -36,11 +32,8 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     private let popover = NSPopover()
     private let contentController = PopoverContentViewController()
-    private let statusTitle = NSTextField(labelWithString: "")
-    private let statusDetail = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
-    private let openFrontendButton = NSButton()
     private let installationProgress = NSProgressIndicator()
 
     private var snapshot = ServiceSnapshot()
@@ -98,8 +91,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         root.appearance = NSAppearance(named: .darkAqua)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = buildHeader()
-
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
         // Rows carry their own internal padding, so the stack only needs a
@@ -119,17 +110,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         document.addSubview(bodyStack)
         scrollView.documentView = document
 
-        root.addSubview(header)
         root.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
             root.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
             root.heightAnchor.constraint(equalToConstant: Self.contentSize.height),
-            header.topAnchor.constraint(equalTo: root.topAnchor),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            header.heightAnchor.constraint(equalToConstant: 56),
-            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -147,59 +133,8 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return root
     }
 
-    private func buildHeader() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        statusTitle.font = .systemFont(ofSize: 13, weight: .semibold)
-        statusTitle.lineBreakMode = .byTruncatingTail
-        statusTitle.maximumNumberOfLines = 1
-        statusTitle.translatesAutoresizingMaskIntoConstraints = false
-        statusDetail.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        statusDetail.textColor = .secondaryLabelColor
-        statusDetail.maximumNumberOfLines = 1
-        statusDetail.lineBreakMode = .byTruncatingTail
-        statusDetail.alignment = .right
-        statusDetail.translatesAutoresizingMaskIntoConstraints = false
-        let titleStack = NSStackView(views: [statusTitle])
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 1
-        titleStack.translatesAutoresizingMaskIntoConstraints = false
-        openFrontendButton.title = "Open"
-        openFrontendButton.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
-        openFrontendButton.imagePosition = .imageLeading
-        openFrontendButton.bezelStyle = .rounded
-        openFrontendButton.controlSize = .small
-        openFrontendButton.target = self
-        openFrontendButton.action = #selector(openFrontendCommand)
-        openFrontendButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(titleStack)
-        container.addSubview(statusDetail)
-        container.addSubview(openFrontendButton)
-        NSLayoutConstraint.activate([
-            titleStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset + 2),
-            titleStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            titleStack.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
-            statusDetail.leadingAnchor.constraint(greaterThanOrEqualTo: titleStack.trailingAnchor, constant: 6),
-            statusDetail.trailingAnchor.constraint(equalTo: openFrontendButton.leadingAnchor, constant: -6),
-            statusDetail.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            statusDetail.widthAnchor.constraint(lessThanOrEqualToConstant: 96),
-            openFrontendButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -(Self.rowInset + 2)),
-            openFrontendButton.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            openFrontendButton.widthAnchor.constraint(equalToConstant: 64),
-            openFrontendButton.heightAnchor.constraint(equalToConstant: 26)
-        ])
-        return container
-    }
-
     private func rebuild() {
         presentation = PopoverPresentation.make(snapshot: snapshot)
-        statusTitle.stringValue = presentation.serviceTitle
-        statusDetail.stringValue = presentation.serviceDetail
-        openFrontendButton.isEnabled = presentation.canOpenFrontend
-        openFrontendButton.toolTip = presentation.canOpenFrontend
-            ? frontendTooltip
-            : "The frontend can be opened once the ForgeCode service is running"
         rebuildBody()
     }
 
@@ -211,8 +146,17 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         buildCommandBody()
     }
 
-    /// The body: the command rows.
+    /// The body: one consistent text-only command list.
     private func buildCommandBody() {
+        bodyStack.addArrangedSubview(commandRow(
+            title: "Open",
+            action: #selector(openFrontendCommand),
+            isEnabled: presentation.canOpenFrontend,
+            toolTip: presentation.canOpenFrontend
+                ? frontendTooltip
+                : "The frontend can be opened once the ForgeCode service is running"
+        ))
+
         if let progress = presentation.installationProgress {
             bodyStack.addArrangedSubview(installationProgressView(progress))
             bodyStack.addArrangedSubview(groupSpacer())
@@ -220,7 +164,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.addArrangedSubview(noteView(presentation.actionableError ?? "Runtime installation failed."))
             bodyStack.addArrangedSubview(commandRow(
                 title: "Retry Runtime Installation",
-                symbol: "arrow.clockwise",
                 action: #selector(retryInstallationCommand),
                 isProminent: true
             ))
@@ -229,16 +172,15 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
         bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
-            symbol: loginItemState == .enabled ? "checkmark.circle.fill" : "circle",
             action: #selector(toggleLaunchAtLoginCommand),
             isOn: loginItemState == .enabled,
             isEnabled: launchAtLoginAvailable,
-            isToggle: true
+            isToggle: true,
+            trailingText: loginItemState == .enabled ? "✓" : nil
         ))
         if loginItemState == .requiresApproval {
             bodyStack.addArrangedSubview(commandRow(
                 title: "Approve in Login Items",
-                symbol: "exclamationmark.triangle",
                 action: #selector(openLoginItemsCommand)
             ))
         } else if case .unavailable(let message) = loginItemState {
@@ -246,20 +188,17 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         }
         bodyStack.addArrangedSubview(commandRow(
             title: "Check for Updates",
-            symbol: "arrow.down.circle",
             action: #selector(checkForUpdatesCommand)
         ))
         if presentation.actionableError != nil {
             bodyStack.addArrangedSubview(commandRow(
                 title: "Show Error Details",
-                symbol: "exclamationmark.triangle.fill",
                 action: #selector(showErrorCommand)
             ))
         }
         bodyStack.addArrangedSubview(groupSpacer())
         bodyStack.addArrangedSubview(commandRow(
             title: "Quit",
-            symbol: "power",
             action: #selector(quitCommand),
             trailingText: "⌘Q"
         ))
@@ -313,24 +252,22 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func commandRow(
         title: String,
-        symbol: String,
         action: Selector,
         isOn: Bool = false,
         isEnabled: Bool = true,
         isToggle: Bool = false,
         trailingText: String? = nil,
-        isProminent: Bool = false
+        isProminent: Bool = false,
+        toolTip: String? = nil
     ) -> NSView {
         let row = CommandRowView(target: self, action: action)
         row.isEnabled = isEnabled
         row.configure(
-            symbol: symbol,
             title: title,
             titleFont: .systemFont(ofSize: 12, weight: isProminent ? .semibold : .regular),
-            tint: isOn ? .controlAccentColor : nil,
             trailingText: trailingText
         )
-        row.toolTip = title
+        row.toolTip = toolTip ?? title
         row.configureAccessibility(
             label: title,
             value: isToggle ? (isOn ? "On" : "Off") : trailingText,
@@ -514,16 +451,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
 }
 
-/// A full-width menu-style row: fixed icon column, generous gap to the label,
-/// and a rounded highlight that only appears on hover. Modelled on the spacing
-/// of native macOS menus rather than stacked buttons.
+/// A full-width, text-only menu row with a rounded highlight on hover.
 private final class CommandRowView: NSView {
     static let height: CGFloat = 28
     static let inset: CGFloat = 10
-    static let iconColumnWidth: CGFloat = 18
-    static let iconToLabelGap: CGFloat = 9
 
-    private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let trailingLabel = NSTextField(labelWithString: "")
     private weak var target: AnyObject?
@@ -536,11 +468,6 @@ private final class CommandRowView: NSView {
             applyContentColors()
         }
     }
-    /// Tint requested by `configure`, retained so the hover state can swap
-    /// between it and the on-highlight variant without the caller
-    /// reconfiguring the row.
-    private var restingTint: NSColor?
-
     var isEnabled = true {
         didSet {
             alphaValue = isEnabled ? 1 : 0.35
@@ -564,9 +491,6 @@ private final class CommandRowView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private func buildLayout() {
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.symbolConfiguration = .init(pointSize: 12, weight: .regular)
-        iconView.imageAlignment = .alignCenter
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
@@ -578,20 +502,12 @@ private final class CommandRowView: NSView {
         trailingLabel.maximumNumberOfLines = 1
         trailingLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        addSubview(iconView)
         addSubview(titleLabel)
         addSubview(trailingLabel)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: Self.iconColumnWidth),
-            iconView.heightAnchor.constraint(equalToConstant: 16),
-            titleLabel.leadingAnchor.constraint(
-                equalTo: iconView.trailingAnchor,
-                constant: Self.iconToLabelGap
-            ),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.leadingAnchor.constraint(
@@ -612,14 +528,10 @@ private final class CommandRowView: NSView {
     }
 
     func configure(
-        symbol: String,
         title: String,
         titleFont: NSFont,
-        tint: NSColor?,
         trailingText: String?
     ) {
-        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        restingTint = tint
         titleLabel.stringValue = title
         titleLabel.font = titleFont
         applyContentColors()
@@ -632,12 +544,10 @@ private final class CommandRowView: NSView {
     private func applyContentColors() {
         if isHovered {
             let onHighlight = NSColor.alternateSelectedControlTextColor
-            iconView.contentTintColor = onHighlight
             titleLabel.textColor = onHighlight
             trailingLabel.textColor = onHighlight.withAlphaComponent(0.75)
         } else {
-            iconView.contentTintColor = restingTint ?? .secondaryLabelColor
-            titleLabel.textColor = restingTint ?? .labelColor
+            titleLabel.textColor = .labelColor
             trailingLabel.textColor = .tertiaryLabelColor
         }
     }
