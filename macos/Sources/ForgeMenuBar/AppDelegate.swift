@@ -53,11 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             serviceController = ServiceController(supervisor: supervisor)
 
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-            statusItem.button?.image = ForgeCodeLogo.statusImage()
-            statusItem.button?.image?.isTemplate = true
             statusItem.button?.target = self
             statusItem.button?.action = #selector(togglePopover(_:))
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            updateStatusItem(serviceController.snapshot)
 
             popoverController = PopoverController()
             wireActions()
@@ -239,6 +238,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItem(_ snapshot: ServiceSnapshot) {
         guard let button = statusItem.button else { return }
+        switch snapshot.phase {
+        case .ready: button.contentTintColor = nil
+        case .installing, .starting, .restarting: button.contentTintColor = .controlAccentColor
+        case .installationFailed, .failed: button.contentTintColor = .systemOrange
+        case .disabled, .stopped: button.contentTintColor = .secondaryLabelColor
+        }
         button.image = ForgeCodeLogo.statusImage()
         button.image?.isTemplate = true
         let presentation = PopoverPresentation.make(snapshot: snapshot)
@@ -246,12 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.setAccessibilityLabel(accessibilityStatus)
         button.setAccessibilityHelp("Open ForgeCode status")
         button.toolTip = accessibilityStatus
-        switch snapshot.phase {
-        case .ready: button.contentTintColor = nil
-        case .installing, .starting, .restarting: button.contentTintColor = .controlAccentColor
-        case .installationFailed, .failed: button.contentTintColor = .systemOrange
-        case .disabled, .stopped: button.contentTintColor = .secondaryLabelColor
-        }
     }
 
     private func presentActionError(title: String, message: String? = nil, error: Error) {
