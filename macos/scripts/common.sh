@@ -903,8 +903,10 @@ verify_signed_app() {
   app=$1
   [ "$(signature_kind "$app")" = "developer-id" ] || fail "app is not signed with a Developer ID Application identity"
   codesign --verify --deep --strict --verbose=2 "$app"
-  xcrun stapler validate "$app"
-  spctl --assess --type execute --verbose=4 "$app"
+  if [ "${VERIFY_NOTARIZATION:-1}" = "1" ]; then
+    xcrun stapler validate "$app"
+    spctl --assess --type execute --verbose=4 "$app"
+  fi
   if [ -n "${SIGNING_TEAM_ID:-}" ]; then
     actual_team=$(codesign -dv --verbose=4 "$app" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
     [ "$actual_team" = "$SIGNING_TEAM_ID" ] \

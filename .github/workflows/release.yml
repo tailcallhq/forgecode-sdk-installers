@@ -95,6 +95,7 @@ jobs:
       mode: ${{ steps.mode.outputs.mode }}
       appcast: ${{ steps.mode.outputs.appcast }}
       dmg_file: ${{ steps.version.outputs.dmg_file }}
+      notarization_id: ${{ steps.signed_release.outputs.notarization_id }}
     env:
       NOTARY_PROFILE: ci-notary
     steps:
@@ -201,12 +202,26 @@ jobs:
             --issuer "$NOTARY_ISSUER_ID"
           rm -f "$key_file"
 
-      - name: Build, sign, and notarize release
+      - name: Build, sign, and submit DMG for notarization
+        id: signed_release
         if: steps.mode.outputs.mode == 'signed'
         working-directory: macos
         env:
           SIGNING_TEAM_ID: ${{ secrets.SIGNING_TEAM_ID }}
-        run: scripts/release.sh
+        run: |
+          set -eu
+          scripts/release.sh
+          submission_id=$(plutil -extract id raw -o - .build-artifacts/notarization-logs/dmg-submit.json)
+          echo "notarization_id=$submission_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Apple notarization submitted"
+            echo ""
+            echo "- Submission ID: \`$submission_id\`"
+            echo "- DMG: \`$DMG_NAME.dmg\`"
+            echo "- Status check: \`xcrun notarytool info $submission_id --keychain-profile <your-profile>\`"
+            echo ""
+            echo "The workflow does not wait for Apple. Verify that this submission is Accepted before publishing the draft release."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build unsigned release
         if: steps.mode.outputs.mode == 'unsigned'
@@ -251,6 +266,14 @@ jobs:
           # Strip the heredoc indentation so the XML declaration is at column 0.
           sed -i '' 's/^          //' "$dist/appcast.xml"
           xmllint --noout "$dist/appcast.xml"
+
+      - name: Upload notarization submission receipt
+        if: steps.mode.outputs.mode == 'signed'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarization-submission
+          path: macos/.build-artifacts/notarization-logs/dmg-submit.json
+          if-no-files-found: error
 
       - name: Stage release artifacts
         env:

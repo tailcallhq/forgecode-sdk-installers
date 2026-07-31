@@ -42,7 +42,7 @@ The distributable is universal (`arm64` + `x86_64`). Build an unsigned app and D
 scripts/package-unsigned.sh
 ```
 
-Unsigned artifacts are written to `dist/unsigned/`; signed/notarized release artifacts are isolated under `dist/signed/`. `package-unsigned.sh` first runs `scripts/test-packaging.sh` and the mandatory Swift tests. It assembles the app and compressed DMG in staging paths, verifies them, and only then atomically publishes each final pathname. Stale app/DMG stages, manifests, checksum temporaries, and unmounted image mounts are cleaned before packaging.
+Unsigned artifacts are written to `dist/unsigned/`; Developer ID-signed release artifacts are isolated under `dist/signed/`. `package-unsigned.sh` first runs `scripts/test-packaging.sh` and the mandatory Swift tests. It assembles the app and compressed DMG in staging paths, verifies them, and only then atomically publishes each final pathname. Stale app/DMG stages, manifests, checksum temporaries, and unmounted image mounts are cleaned before packaging.
 
 The unsigned path ad-hoc signs the Mach-O executable and then the bundle, verifies that both signatures are specifically ad-hoc, and verifies the bundle seal. Ad-hoc signing supplies integrity metadata only: it carries no publisher identity, is not notarized, and does not make a downloaded app trustworthy. The signed path still replaces those signatures with the configured Developer ID identity before notarization.
 
@@ -108,9 +108,9 @@ export NOTARY_PROFILE='forge-menubar-notary'
 scripts/release.sh
 ```
 
-The release pipeline validates the universal application slices, minimum OS, dependencies, and exact runtime-free payload inventory; replaces the development seal by signing the application executable and bundle with hardened runtime; notarizes, staples, and assesses the app and DMG; compares the complete mounted app bundle; validates the `/Applications` symlink; and atomically writes and verifies the exact manifest/checksum inventory plus retained notarization logs. Real signing credentials are not needed for development: `scripts/package-unsigned.sh` runs the ad-hoc validation path.
+The release pipeline validates the universal application slices, minimum OS, dependencies, and exact runtime-free payload inventory; replaces the development seal by signing the application executable and bundle with hardened runtime; creates and signs the DMG; compares the complete mounted app bundle; validates the `/Applications` symlink; and atomically writes and verifies the exact manifest/checksum inventory. It submits only the signed DMG to Apple and returns as soon as `notarytool` supplies a submission ID. It does not submit the app separately, wait for acceptance, or staple the artifact. CI records the submission ID and uploads `dmg-submit.json`; confirm that Apple reports `Accepted` before publishing the draft release. Real signing credentials are not needed for development: `scripts/package-unsigned.sh` runs the ad-hoc validation path.
 
-Useful individual commands are `scripts/assemble-app.sh`, `scripts/sign-app.sh`, `scripts/notarize-app.sh`, `scripts/create-dmg.sh`, `scripts/sign-dmg.sh`, `scripts/notarize-dmg.sh`, and `scripts/verify-release.sh`. `APP_VERSION`, `BUILD_NUMBER`, and `MINIMUM_MACOS_VERSION` accept numeric dot-separated plist versions only.
+Useful individual commands are `scripts/assemble-app.sh`, `scripts/sign-app.sh`, `scripts/create-dmg.sh`, `scripts/sign-dmg.sh`, `scripts/notarize-dmg.sh`, and `scripts/verify-release.sh`. `APP_VERSION`, `BUILD_NUMBER`, and `MINIMUM_MACOS_VERSION` accept numeric dot-separated plist versions only.
 
 ## Current limitations and security
 
