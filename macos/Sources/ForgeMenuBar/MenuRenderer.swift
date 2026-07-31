@@ -196,7 +196,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
                 action: #selector(showErrorCommand)
             ))
         }
-        bodyStack.addArrangedSubview(groupSpacer())
         bodyStack.addArrangedSubview(commandRow(
             title: "Quit",
             action: #selector(quitCommand),
