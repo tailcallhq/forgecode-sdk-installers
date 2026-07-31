@@ -329,12 +329,13 @@ jobs:
           chmod 0600 app-store-connect-key.json
 
       - name: Submit DMG and wait for Apple acceptance
-        uses: indygreg/apple-code-sign-action@5e7a4a01fe4dffe948ef3bcf1f4538d963cb0c72 # v1.2
+        uses: ssddOnTop/apple-code-sign-action@36903ed941d6bbc9d989fc5bf768a96f25e43be9
         with:
           input_path: candidate/signed/${{ needs.build_release.outputs.dmg_file }}
           sign: false
           notarize: true
           staple: false
+          max_wait_seconds: 172800
           app_store_connect_api_key_json_file: app-store-connect-key.json
           rcodesign_version: 0.29.0
 
