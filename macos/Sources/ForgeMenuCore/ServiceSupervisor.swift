@@ -1,6 +1,8 @@
 import Foundation
 
 public actor ServiceSupervisor {
+    private static let updateInstalledExitStatus: Int32 = 75
+
     public struct Configuration: Sendable {
         public let readinessTimeout: TimeInterval
         public let readinessPollInterval: TimeInterval
@@ -515,7 +517,9 @@ public actor ServiceSupervisor {
             supervisor.snapshot.endpoint = nil
             supervisor.snapshot.phase = .failed("forge3 exited unexpectedly with status \(status).")
             supervisor.publishSnapshot()
-            supervisor.scheduleRestart(runtime: runtime)
+            let restartImmediately = status == Self.updateInstalledExitStatus
+                && supervisor.restartAttempt == 0
+            supervisor.scheduleRestart(runtime: runtime, immediately: restartImmediately)
         }
     }
 
@@ -563,13 +567,13 @@ public actor ServiceSupervisor {
         scheduleRestart(runtime: 0)
     }
 
-    private func scheduleRestart(runtime: TimeInterval) {
+    private func scheduleRestart(runtime: TimeInterval, immediately: Bool = false) {
         guard desiredEnabled, !terminating else { return }
         restartAttempt = configuration.restartBackoff.nextAttempt(
             previousAttempt: restartAttempt,
             runtime: runtime
         )
-        let delay = configuration.restartBackoff.delay(forAttempt: restartAttempt)
+        let delay = immediately ? 0 : configuration.restartBackoff.delay(forAttempt: restartAttempt)
         snapshot.phase = .restarting(attempt: restartAttempt, delay: delay)
         publishSnapshot()
         logger.warning("Restarting forge3 in \(String(format: "%.1f", delay)) seconds (attempt \(restartAttempt))")
