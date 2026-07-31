@@ -83,7 +83,7 @@ if [ -f "$DMG_PATH" ]; then
   if [ "$BUILD_FLAVOR" = "signed" ]; then
     [ "$(signature_kind "$DMG_PATH")" = "developer-id" ] || fail "DMG is not Developer ID signed"
     codesign --verify --strict --verbose=2 "$DMG_PATH"
-    if [ "${VERIFY_NOTARIZATION:-1}" = "1" ]; then
+    if [ "${VERIFY_DMG_NOTARIZATION:-1}" = "1" ]; then
       xcrun stapler validate "$DMG_PATH"
       spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
     fi
