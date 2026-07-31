@@ -271,7 +271,7 @@ jobs:
       && github.event_name != 'pull_request'
       && needs.build_release.result == 'success'
       && needs.build_release.outputs.mode == 'signed'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 2880
     permissions:
       contents: read
