@@ -14,7 +14,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     // Sized so the steady-state text list fits snugly without scrolling.
     // Transient states with extra rows or details overflow into the scroll view
     // within this same fixed frame.
-    static let contentSize = NSSize(width: 260, height: 146)
+    static let contentSize = NSSize(width: 260, height: 130)
     private static let bodyContentWidth: CGFloat = 252
     /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 10
