@@ -42,6 +42,7 @@ jobs:
             macos:
               - "macos/**"
               - "versions.sh"
+              - ".github/scripts/**"
               - ".github/workflows/release.yml"
 
   draft_release:
@@ -201,9 +202,13 @@ jobs:
         if: github.event_name != 'pull_request' && steps.mode.outputs.mode == 'signed'
         run: |
           set -euo pipefail
-          rm -rf release-transfer
-          mkdir -p release-transfer
-          tar -C macos/dist -czf release-transfer/signed-release.tar.gz signed
+          .github/scripts/release-finalization.sh clean-workspace release-transfer
+          mkdir -p release-transfer/payload/sparkle
+          cp -R macos/dist/signed release-transfer/payload/signed
+          cp macos/Vendor/Sparkle/bin/sign_update release-transfer/payload/sparkle/sign_update
+          .github/scripts/release-finalization.sh create-archive \
+            release-transfer/signed-release.tar.gz release-transfer/payload
+          rm -rf release-transfer/payload
 
       - name: Upload signed candidate for notarization
         if: github.event_name != 'pull_request' && steps.mode.outputs.mode == 'signed'
@@ -212,7 +217,8 @@ jobs:
           name: signed-release-candidate
           path: release-transfer/signed-release.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
       - name: Stage dry-run artifacts
         if: github.event_name == 'pull_request'
@@ -236,6 +242,7 @@ jobs:
           name: release-macos-dry-run
           path: release-artifacts/*
           if-no-files-found: error
+          overwrite: true
 
       - name: Report dry-run artifact
         if: github.event_name == 'pull_request'
@@ -278,6 +285,12 @@ jobs:
     env:
       DMG_FILE: ${{ needs.build_release.outputs.dmg_file }}
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Clean persistent transfer workspace
+        run: .github/scripts/release-finalization.sh clean-workspace candidate release-transfer
+
       - name: Download signed candidate
         uses: actions/download-artifact@v4
         with:
@@ -290,9 +303,11 @@ jobs:
           test -f release-transfer/signed-release.tar.gz
           mkdir -p candidate
           tar -xzf release-transfer/signed-release.tar.gz -C candidate
+          .github/scripts/release-finalization.sh reject-appledouble candidate
           test -f "candidate/signed/$DMG_FILE"
           test -f candidate/signed/manifest.txt
           test -f candidate/signed/SHA256SUMS
+          test -f candidate/sparkle/sign_update
           find candidate/signed -maxdepth 1 -type f -print | sort
           sha256sum "candidate/signed/$DMG_FILE" | tee release-transfer/pre-notarization.sha256
 
@@ -343,8 +358,8 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum -c release-transfer/pre-notarization.sha256
-          rm -f release-transfer/notarized-release.tar.gz
-          tar -C candidate -czf release-transfer/notarized-release.tar.gz signed
+          .github/scripts/release-finalization.sh create-archive \
+            release-transfer/notarized-release.tar.gz candidate
 
       - name: Upload accepted unstapled candidate
         uses: actions/upload-artifact@v4
@@ -352,7 +367,8 @@ jobs:
           name: notarized-release-candidate
           path: release-transfer/notarized-release.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
       - name: Remove App Store Connect credentials
         if: always()
@@ -371,7 +387,7 @@ jobs:
       && needs.build_release.result == 'success'
       && needs.notarize_release.result == 'success'
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:
@@ -385,6 +401,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Clean transfer workspace
+        run: .github/scripts/release-finalization.sh clean-workspace candidate release-transfer
+
       - name: Restore accepted candidate
         uses: actions/download-artifact@v4
         with:
@@ -394,10 +413,15 @@ jobs:
       - name: Extract accepted candidate
         run: |
           set -euo pipefail
+          mkdir -p candidate
+          tar -xzf release-transfer/notarized-release.tar.gz -C candidate
+          test -f "candidate/signed/$DMG_FILE"
+          test -f candidate/sparkle/sign_update
           rm -rf macos/dist/signed
-          mkdir -p macos/dist
-          tar -xzf release-transfer/notarized-release.tar.gz -C macos/dist
-          test -f "macos/dist/signed/$DMG_FILE"
+          mkdir -p macos/dist macos/Vendor/Sparkle/bin
+          mv candidate/signed macos/dist/signed
+          cp candidate/sparkle/sign_update macos/Vendor/Sparkle/bin/sign_update
+          chmod 0755 macos/Vendor/Sparkle/bin/sign_update
 
       - name: Normalize release environment
         run: |
@@ -414,11 +438,6 @@ jobs:
         env:
           SIGNING_TEAM_ID: ${{ secrets.SIGNING_TEAM_ID }}
         run: scripts/staple-dmg.sh
-
-      - name: Vendor Sparkle for final appcast
-        if: needs.build_release.outputs.appcast == 'true'
-        working-directory: macos
-        run: tools/fetch-sparkle.sh
 
       - name: Generate appcast from final stapled DMG bytes
         if: needs.build_release.outputs.appcast == 'true'
@@ -454,15 +473,11 @@ jobs:
           xmllint --noout "$dist/appcast.xml"
 
       - name: Stage only final release artifacts
+        env:
+          HAS_APPCAST: ${{ needs.build_release.outputs.appcast }}
         run: |
-          set -euo pipefail
-          dist="macos/dist/signed"
-          rm -rf release-artifacts
-          mkdir -p release-artifacts
-          cp "$dist/$DMG_FILE" release-artifacts/
-          if [ -f "$dist/appcast.xml" ]; then
-            cp "$dist/appcast.xml" release-artifacts/
-          fi
+          .github/scripts/release-finalization.sh stage-final \
+            macos/dist/signed release-artifacts "$DMG_FILE" "$HAS_APPCAST"
 
       - name: Upload final notarized release artifacts
         uses: actions/upload-artifact@v4
@@ -470,6 +485,7 @@ jobs:
           name: release-macos-final
           path: release-artifacts/*
           if-no-files-found: error
+          overwrite: true
 
   upload_release_artifacts:
     name: Upload Release Artifacts
@@ -490,6 +506,9 @@ jobs:
       DMG_FILE: ${{ needs.finalize_release.outputs.dmg_file }}
       HAS_APPCAST: ${{ needs.finalize_release.outputs.appcast }}
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Download final staged artifacts
         uses: actions/download-artifact@v4
         with:
@@ -500,13 +519,14 @@ jobs:
         run: |
           set -euo pipefail
           cd release-artifacts
-          expected=("$DMG_FILE")
+          expected=("$DMG_FILE" "SHA256SUMS.transfer")
           if [ "$HAS_APPCAST" = "true" ]; then
             expected+=("appcast.xml")
           fi
           for file in "${expected[@]}"; do
             test -f "$file" || { echo "missing expected final artifact: $file" >&2; exit 1; }
           done
+          ../.github/scripts/release-finalization.sh verify-transfer .
           actual_count=$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')
           expected_count=${#expected[@]}
           if [ "$actual_count" != "$expected_count" ]; then
@@ -520,12 +540,25 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          release=$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets)
+          release=$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft)
           [ "$(jq -r '.isDraft' <<< "$release")" = "true" ] \
             || { echo "target release is not a draft: $TAG_NAME" >&2; exit 1; }
-          jq -r '.assets[].name | select(. == "appcast.xml" or (startswith("ForgeCode-") and endswith(".dmg")))' <<< "$release" \
+
+          assets=("release-artifacts/$DMG_FILE")
+          if [ "$HAS_APPCAST" = "true" ]; then
+            assets+=("release-artifacts/appcast.xml")
+          fi
+          gh release upload "$TAG_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
+          release=$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets)
+          for asset in "${assets[@]}"; do
+            name=${asset##*/}
+            jq -e --arg name "$name" '.assets | any(.name == $name)' <<< "$release" >/dev/null \
+              || { echo "uploaded asset is missing from draft release: $name" >&2; exit 1; }
+          done
+
+          jq -r '.assets[].name' <<< "$release" \
+            | .github/scripts/release-finalization.sh obsolete-assets "$DMG_FILE" "$HAS_APPCAST" \
             | while IFS= read -r asset; do
                 gh release delete-asset "$TAG_NAME" "$asset" --repo "$GITHUB_REPOSITORY" --yes
               done
-          find release-artifacts -maxdepth 1 -type f -print0 \
-            | xargs -0 gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY"

@@ -7,6 +7,7 @@ on:
     paths:
       - "macos/**"
       - "versions.sh"
+      - ".github/scripts/**"
       - ".github/workflows/ci.yml"
   workflow_dispatch: {}
 
@@ -24,6 +25,9 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Test release finalization helpers
+        run: .github/scripts/test-release-finalization.sh
 
       - name: Cache Swift build
         uses: actions/cache@v4
