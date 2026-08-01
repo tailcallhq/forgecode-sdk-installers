@@ -395,6 +395,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf macos/dist/signed
+          mkdir -p macos/dist
           tar -xzf release-transfer/notarized-release.tar.gz -C macos/dist
           test -f "macos/dist/signed/$DMG_FILE"
 
