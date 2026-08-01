@@ -1041,6 +1041,78 @@ final class ServiceSupervisorTests: XCTestCase {
         await supervisor.stopForTermination()
     }
 
+    func testUpdateInstalledExitRestartsImmediately() async {
+        let process = RecordingProcessHost()
+        let delays = Locked<[TimeInterval]>([])
+        let supervisor = ServiceSupervisor(
+            processHost: process,
+            runtimeInstaller: cachedRuntimeInstaller,
+            endpointAllocator: SequenceEndpointAllocator([
+                LoopbackEndpoint(port: 50_048), LoopbackEndpoint(port: 50_049)
+            ]),
+            clientFactory: { _ in StubRPCClient([.hang]) },
+            configuration: .init(restartBackoff: .init(baseDelay: 10, maximumDelay: 10)),
+            sleep: { delay in
+                delays.withValue { $0.append(delay) }
+                if delay > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            }
+        )
+        await supervisor.installCallbacks()
+        await supervisor.setEnabled(true)
+        let didStart = await waitUntil { process.recordedGenerations().count == 1 }
+        XCTAssertTrue(didStart)
+
+        process.emitUnexpectedExit(status: 75, runtime: 1)
+
+        let didRestart = await waitUntil { process.recordedEndpoints().count == 2 }
+        XCTAssertTrue(didRestart)
+        XCTAssertEqual(delays.value.filter { $0 == 0 }, [0])
+        XCTAssertEqual(
+            process.recordedEndpoints(),
+            [LoopbackEndpoint(port: 50_048), LoopbackEndpoint(port: 50_049)]
+        )
+        await supervisor.stopForTermination()
+    }
+
+    func testRepeatedUpdateInstalledExitUsesBackoff() async {
+        let process = RecordingProcessHost()
+        let delays = Locked<[TimeInterval]>([])
+        let supervisor = ServiceSupervisor(
+            processHost: process,
+            runtimeInstaller: cachedRuntimeInstaller,
+            endpointAllocator: SequenceEndpointAllocator([
+                LoopbackEndpoint(port: 50_060), LoopbackEndpoint(port: 50_061),
+                LoopbackEndpoint(port: 50_062)
+            ]),
+            clientFactory: { _ in StubRPCClient([.hang]) },
+            configuration: .init(restartBackoff: .init(baseDelay: 0.01, maximumDelay: 0.01)),
+            sleep: { delay in
+                delays.withValue { $0.append(delay) }
+                if delay > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+            }
+        )
+        await supervisor.installCallbacks()
+        await supervisor.setEnabled(true)
+        let didStart = await waitUntil { process.recordedGenerations().count == 1 }
+        XCTAssertTrue(didStart)
+
+        process.emitUnexpectedExit(status: 75, runtime: 0)
+        let didRestartImmediately = await waitUntil { process.recordedGenerations().count == 2 }
+        XCTAssertTrue(didRestartImmediately)
+        process.emitUnexpectedExit(status: 75, runtime: 0)
+
+        let didApplyBackoff = await waitUntil { delays.value.contains(0.01) }
+        XCTAssertTrue(didApplyBackoff)
+        XCTAssertEqual(delays.value.filter { $0 <= 0.01 }, [0, 0.01])
+        let didRestartAgain = await waitUntil { process.recordedGenerations().count == 3 }
+        XCTAssertTrue(didRestartAgain)
+        await supervisor.stopForTermination()
+    }
+
     func testUnexpectedExitSchedulesRestartWithNewEndpoint() async {
         let process = RecordingProcessHost()
         let client = StubRPCClient([.hang])
