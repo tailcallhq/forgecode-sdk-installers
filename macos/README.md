@@ -99,18 +99,17 @@ The active app does not poll usage, extensions, models, or providers. Readiness 
 
 ## Signed release
 
-Create a Developer ID Application certificate and a `notarytool` keychain profile, then run:
+Create a Developer ID Application certificate, then run the local build/sign stage:
 
 ```sh
 export SIGNING_IDENTITY='Developer ID Application: Example Corp (TEAMID)'
 export SIGNING_TEAM_ID='TEAMID'
-export NOTARY_PROFILE='forge-menubar-notary'
 scripts/release.sh
 ```
 
-The release pipeline validates the universal application slices, minimum OS, dependencies, and exact runtime-free payload inventory; replaces the development seal by signing the application executable and bundle with hardened runtime; creates and signs the DMG; compares the complete mounted app bundle; validates the `/Applications` symlink; and atomically writes and verifies the exact manifest/checksum inventory. It submits only the signed DMG to Apple and returns as soon as `notarytool` supplies a submission ID. It does not submit the app separately, wait for acceptance, or staple the artifact. CI records the submission ID and uploads `dmg-submit.json`; confirm that Apple reports `Accepted` before publishing the draft release. Real signing credentials are not needed for development: `scripts/package-unsigned.sh` runs the ad-hoc validation path.
+The release pipeline validates the universal application slices, minimum OS, dependencies, and exact runtime-free payload inventory; replaces the development seal by signing the application executable and bundle with hardened runtime; creates and signs the DMG; compares the complete mounted app bundle; validates the `/Applications` symlink; and atomically writes and verifies the exact manifest/checksum inventory. CI submits only the signed DMG from Linux with pinned `rcodesign`, waits for Apple acceptance, then returns to macOS to staple and comprehensively validate the final DMG before uploading it and the optional final appcast to the draft release. Real signing credentials are not needed for development: `scripts/package-unsigned.sh` runs the ad-hoc validation path.
 
-Useful individual commands are `scripts/assemble-app.sh`, `scripts/sign-app.sh`, `scripts/create-dmg.sh`, `scripts/sign-dmg.sh`, `scripts/notarize-dmg.sh`, and `scripts/verify-release.sh`. `APP_VERSION`, `BUILD_NUMBER`, and `MINIMUM_MACOS_VERSION` accept numeric dot-separated plist versions only.
+Useful individual commands are `scripts/assemble-app.sh`, `scripts/sign-app.sh`, `scripts/create-dmg.sh`, `scripts/sign-dmg.sh`, `scripts/staple-dmg.sh`, and `scripts/verify-release.sh`. `APP_VERSION`, `BUILD_NUMBER`, and `MINIMUM_MACOS_VERSION` accept numeric dot-separated plist versions only.
 
 ## Current limitations and security
 
