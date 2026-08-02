@@ -106,11 +106,14 @@ func rgb(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
     )
 }
 
-let colorBgBase = rgb(0xFAF9F5)      // --primitive-gray-50
-let colorTextPrimary = rgb(0x232427) // --primitive-gray-900
-let colorTextSubtle = rgb(0x7A7260)  // --primitive-gray-500
-let colorAccent = rgb(0xF97316)      // --primitive-orange-500
-let colorMonoText = rgb(0xC2410C)    // --primitive-orange-700 (--color-mono-text)
+// Dark theme ([data-theme="dark"]) is used deliberately: the app icon artwork
+// is a black squircle, which disappears into the light theme's near-white
+// paper. The dark surface gives the mark a rim of contrast instead.
+let colorBgBase = rgb(0x1C1D1F)      // --primitive-gray-950 (dark --color-bg-base)
+let colorTextPrimary = rgb(0xE4E0D0) // --primitive-gray-200 (dark --color-text-primary)
+let colorTextSubtle = rgb(0xA8A088)  // --primitive-gray-400 (dark --color-text-subtle)
+let colorAccent = rgb(0xF97316)      // --primitive-orange-500 (unchanged across themes)
+let colorMonoText = rgb(0xF5DFA8)    // --primitive-sand-300 (dark --color-mono-text)
 
 // Renders at 2x pixel density with a 144 DPI tag so Finder shows the image at
 // point size on both retina and non-retina displays without blur.
@@ -157,7 +160,9 @@ func drawBackground(width: CGFloat, height: CGFloat) {
     bounds.fill()
 
     // Diagonal grid texture — the desktop app's `.grid-background` stripes,
-    // rendered at a whisper so it reads as paper grain, not noise.
+    // rendered at a whisper so it reads as grain, not noise. Dark theme uses
+    // white stripes (`--grid-line-color: rgba(255,255,255,0.05)`); black ones
+    // are invisible against the near-black base.
     let stripeSpacing: CGFloat = 6
     let stripe = NSBezierPath()
     stripe.lineWidth = stripeSpacing / 2
@@ -167,7 +172,7 @@ func drawBackground(width: CGFloat, height: CGFloat) {
         stripe.line(to: NSPoint(x: offset + height, y: height))
         offset += stripeSpacing
     }
-    rgb(0x000000, alpha: 0.02).setStroke()
+    rgb(0xFFFFFF, alpha: 0.02).setStroke()
     stripe.stroke()
 
     // Center row: a neural net links the two icons — a single input
