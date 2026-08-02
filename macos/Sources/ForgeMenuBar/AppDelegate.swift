@@ -138,8 +138,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu(title: "Main Menu")
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
+        // Kept verbatim in sync with the panel row in MenuRenderer: both invoke
+        // the same Sparkle check, and the label is scoped to the app so it is
+        // not read as covering the separately-updated server runtime.
         let checkForUpdates = NSMenuItem(
-            title: "Check for Updates",
+            title: "Update ForgeCode App",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )

@@ -3,7 +3,7 @@ import ForgeMenuCore
 import Foundation
 
 @MainActor
-final class PopoverController: NSObject, NSPopoverDelegate {
+final class PopoverController: NSObject {
     enum LoginItemState: Equatable {
         case enabled
         case disabled
@@ -11,15 +11,26 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         case unavailable(String)
     }
 
-    // Sized so the steady-state text list fits snugly without scrolling.
-    // Transient states with extra rows or details overflow into the scroll view
-    // within this same fixed frame.
-    static let contentSize = NSSize(width: 260, height: 130)
-    private static let bodyContentWidth: CGFloat = 252
+    /// The panel is width-fixed and height-fits-content: the row list is short
+    /// and its length varies by state, so a fixed height would either clip the
+    /// transient states or leave dead space in the steady state.
+    static let contentWidth: CGFloat = 280
+    /// Ceiling for the fitted height. Beyond this the list scrolls rather than
+    /// growing into a panel taller than the states that actually occur.
+    private static let maxContentHeight: CGFloat = 420
+    private static let bodyContentWidth = contentWidth - 8
     /// Horizontal inset shared by rows and notes.
-    private static let rowInset: CGFloat = 10
+    private static let rowInset: CGFloat = 12
     /// Left edge shared by command titles and supporting notes.
     private static let labelColumnInset = rowInset
+    /// Corner radius of the panel. Matches the system menu silhouette.
+    private static let cornerRadius: CGFloat = 12
+    /// Gap between the menu bar and the top of the panel.
+    private static let menuBarGap: CGFloat = 6
+
+    /// How far the panel's left edge extends past the status item's left
+    /// edge. System menus leave a small overhang rather than aligning exactly.
+    private static let leftEdgeOverhang: CGFloat = 8
 
     var onWillShow: (() -> Void)?
     var onLaunchAtLoginChanged: ((Bool) -> Void)?
@@ -30,8 +41,14 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var onCheckForUpdates: (() -> Void)?
     var onQuit: (() -> Void)?
 
-    private let popover = NSPopover()
+    private let panel = MenuPanel(
+        contentRect: NSRect(x: 0, y: 0, width: PopoverController.contentWidth, height: 100),
+        styleMask: [.borderless, .nonactivatingPanel],
+        backing: .buffered,
+        defer: false
+    )
     private let contentController = PopoverContentViewController()
+    private let backdrop = NSVisualEffectView()
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
     private let installationProgress = NSProgressIndicator()
@@ -47,7 +64,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     override init() {
         super.init()
-        configurePopover()
+        configurePanel()
         rebuild()
     }
 
@@ -72,23 +89,41 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         applyVisibilityEvent(.outsideInteraction)
     }
 
-    private func configurePopover() {
-        popover.behavior = .applicationDefined
-        popover.animates = true
-        popover.contentSize = Self.contentSize
-        popover.delegate = self
-        contentController.preferredContentSize = Self.contentSize
+    private func configurePanel() {
         contentController.onCancel = { [weak self] in self?.close() }
         contentController.view = buildRootView()
-        popover.contentViewController = contentController
+
+        // A borderless panel replaces NSPopover so the menu reads as a plain
+        // floating box: NSPopover always draws a callout arrow and an opaque
+        // backdrop behind its content, neither of which can be turned off.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovable = false
+        panel.hidesOnDeactivate = false
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.animationBehavior = .utilityWindow
+        panel.contentViewController = contentController
     }
 
     private func buildRootView() -> NSView {
-        let root = NSVisualEffectView()
-        root.material = .hudWindow
+        let root = backdrop
+        // `.menu` is the material the system menus themselves use, so the panel
+        // picks up the same translucency and blur rather than the flatter,
+        // heavier `.hudWindow` wash.
+        root.material = .menu
         root.blendingMode = .behindWindow
         root.state = .active
-        root.appearance = NSAppearance(named: .darkAqua)
+        // Deliberately no explicit `appearance`: leaving it nil lets the view
+        // inherit the system light/dark setting, matching every other menu bar
+        // panel. Pinning it to .darkAqua forced a dark menu onto light-mode
+        // users.
+        root.wantsLayer = true
+        // The mask (rather than layer.cornerRadius) is what clips a
+        // behind-window blend correctly; a plain cornerRadius leaves the
+        // blurred backdrop showing square corners underneath.
+        root.maskImage = Self.roundedMask(radius: Self.cornerRadius)
         root.translatesAutoresizingMaskIntoConstraints = false
 
         bodyStack.orientation = .vertical
@@ -96,7 +131,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         // Rows carry their own internal padding, so the stack only needs a
         // small outer margin and a hairline gap between rows.
         bodyStack.spacing = 1
-        bodyStack.edgeInsets = NSEdgeInsets(top: 6, left: 4, bottom: 8, right: 4)
+        bodyStack.edgeInsets = NSEdgeInsets(top: 6, left: 4, bottom: 6, right: 4)
         bodyStack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.drawsBackground = false
@@ -113,8 +148,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         root.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            root.widthAnchor.constraint(equalToConstant: Self.contentSize.width),
-            root.heightAnchor.constraint(equalToConstant: Self.contentSize.height),
+            root.widthAnchor.constraint(equalToConstant: Self.contentWidth),
             scrollView.topAnchor.constraint(equalTo: root.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -128,9 +162,23 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             bodyStack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             bodyStack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             bodyStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            bodyStack.widthAnchor.constraint(equalToConstant: Self.contentSize.width)
+            bodyStack.widthAnchor.constraint(equalToConstant: Self.contentWidth)
         ])
         return root
+    }
+
+    /// A resizable rounded-rect mask. The center is stretched, so one image
+    /// serves every panel height.
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let edge = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     private func rebuild() {
@@ -186,16 +234,23 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         } else if case .unavailable(let message) = loginItemState {
             bodyStack.addArrangedSubview(noteView("Login item unavailable: \(message)"))
         }
-        bodyStack.addArrangedSubview(commandRow(
-            title: "Check for Updates",
-            action: #selector(checkForUpdatesCommand)
-        ))
         if presentation.actionableError != nil {
             bodyStack.addArrangedSubview(commandRow(
                 title: "Show Error Details",
                 action: #selector(showErrorCommand)
             ))
         }
+        // Separator fencing off the two app-level commands from the
+        // service-related rows above.
+        bodyStack.addArrangedSubview(separator())
+        bodyStack.addArrangedSubview(commandRow(
+            // Deliberately not "Check for Updates": the bundled server updates
+            // on its own cadence, so an unqualified label reads as though it
+            // covers both. "App" scopes it to this menu bar app only.
+            title: "Update ForgeCode App",
+            action: #selector(checkForUpdatesCommand),
+            toolTip: "Check for updates to the ForgeCode menu bar app (not the bundled server runtime)"
+        ))
         bodyStack.addArrangedSubview(commandRow(
             title: "Quit",
             action: #selector(quitCommand),
@@ -209,7 +264,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 10)
+        label.font = Typography.note
         label.textColor = .secondaryLabelColor
         label.translatesAutoresizingMaskIntoConstraints = false
 
@@ -263,7 +318,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         row.isEnabled = isEnabled
         row.configure(
             title: title,
-            titleFont: .systemFont(ofSize: 12, weight: isProminent ? .semibold : .regular),
+            titleFont: Typography.rowTitle(prominent: isProminent),
             trailingText: trailingText
         )
         row.toolTip = toolTip ?? title
@@ -288,13 +343,32 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return container
     }
 
+    /// A hairline divider, inset to the label column so it aligns with row text
+    /// rather than spanning the full panel edge to edge.
+    private func separator() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let line = NSBox()
+        line.boxType = .separator
+        line.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(line)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
+            container.heightAnchor.constraint(equalToConstant: 11),
+            line.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset),
+            line.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.rowInset),
+            line.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+        return container
+    }
+
     /// Secondary text aligned to the label column, so it reads as a note about
     /// the row above rather than a row of its own.
     private func noteView(_ text: String) -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 10)
+        label.font = Typography.note
         label.textColor = .tertiaryLabelColor
         label.maximumNumberOfLines = 2
         label.lineBreakMode = .byTruncatingTail
@@ -322,17 +396,54 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             guard let button = button ?? statusButton else { visibilityState = .hidden; return }
             onWillShow?()
             rebuild()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            positionPanel(relativeTo: button)
+            panel.orderFrontRegardless()
             // An accessory app is not active by default, so key events would
             // otherwise be delivered to whatever app is frontmost. Activate and
-            // take key focus so Escape and Command-Q reach this popover.
+            // take key focus so Escape and Command-Q reach this panel.
             NSApp.activate(ignoringOtherApps: true)
-            contentController.view.window?.makeKeyAndOrderFront(nil)
+            panel.makeKeyAndOrderFront(nil)
+            // Becoming key makes AppKit promote the first focusable row to
+            // first responder, which draws a focus ring on a row the user never
+            // chose. Hand focus back to the window; Tab still starts traversal.
+            panel.initialFirstResponder = nil
+            panel.makeFirstResponder(nil)
             installAllMonitors()
         case .close:
             removeAllMonitors()
-            if popover.isShown { popover.performClose(nil) }
+            // The panel has no close delegate, so unlike NSPopover there is no
+            // `.popoverDidClose` echo; the transition above already left the
+            // state `.hidden`.
+            if panel.isVisible { panel.orderOut(nil) }
         }
+    }
+
+    /// Sizes the panel to its content and pins it under the status item,
+    /// clamped to the screen so it cannot run off the right edge.
+    private func positionPanel(relativeTo button: NSStatusBarButton) {
+        let fitted = bodyStack.fittingSize.height
+        let height = min(max(fitted, 1), Self.maxContentHeight)
+        // The scroll view only ever engages once content exceeds the ceiling.
+        scrollView.hasVerticalScroller = fitted > Self.maxContentHeight
+        panel.setContentSize(NSSize(width: Self.contentWidth, height: height))
+
+        guard let buttonWindow = button.window else { return }
+        let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let screen = buttonWindow.screen ?? NSScreen.main
+        // The panel left-aligns to the status item rather than centring on it,
+        // so the body hangs to the right of its icon. The overhang pulls the
+        // edge just past the icon so the icon does not sit flush against the
+        // corner of the panel. The clamp below still catches the case where a
+        // status item sits far enough right that the panel would overflow.
+        var origin = NSPoint(
+            x: buttonFrame.minX - Self.leftEdgeOverhang,
+            y: buttonFrame.minY - height - Self.menuBarGap
+        )
+        if let visible = screen?.visibleFrame {
+            origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - Self.contentWidth - 8)
+            origin.y = max(origin.y, visible.minY + 8)
+        }
+        panel.setFrameOrigin(origin)
     }
 
     private func installAllMonitors() {
@@ -389,8 +500,8 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func isInsidePopover(_ screenPoint: NSPoint) -> Bool {
-        guard let window = contentController.view.window, window.isVisible else { return false }
-        return window.frame.contains(screenPoint)
+        guard panel.isVisible else { return false }
+        return panel.frame.contains(screenPoint)
     }
 
     private func isInsideStatusButton(_ screenPoint: NSPoint) -> Bool {
@@ -406,10 +517,6 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private func removeAllMonitors() {
         removeMouseMonitors()
         if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor); self.localKeyMonitor = nil }
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        applyVisibilityEvent(.popoverDidClose)
     }
 
     // Toggles keep the popover open so the resulting state change is visible.
@@ -450,10 +557,45 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
 }
 
+/// Type scale for the menu. Sizes track the system menu bar metrics rather
+/// than the smaller control sizes the panel previously used, which rendered
+/// cramped next to native menus like the one in the reference screenshot.
+enum Typography {
+    /// Row titles: 13pt medium. Regular weight at this size reads thin against
+    /// a translucent backdrop, so medium is the resting weight and semibold is
+    /// reserved for prominent (call-to-action) rows.
+    static func rowTitle(prominent: Bool) -> NSFont {
+        let size: CGFloat = 13
+        let weight: NSFont.Weight = prominent ? .semibold : .medium
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        // The system UI face at display sizes; falls back to `base` on any OS
+        // that does not vend the descriptor.
+        guard let descriptor = base.fontDescriptor.withDesign(.default) else { return base }
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
+    /// Key equivalents and checkmarks. A step down and lighter than the title,
+    /// so the shortcut column recedes.
+    static let rowTrailing = NSFont.systemFont(ofSize: 12, weight: .regular)
+
+    /// Supporting notes and progress captions.
+    static let note = NSFont.systemFont(ofSize: 11, weight: .regular)
+}
+
+/// A borderless panel that can take key focus. `NSPanel` refuses to become key
+/// while borderless unless this is overridden, which would leave Escape and
+/// Command-Q unhandled.
+final class MenuPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 /// A full-width, text-only menu row with a rounded highlight on hover.
 private final class CommandRowView: NSView {
-    static let height: CGFloat = 28
-    static let inset: CGFloat = 10
+    /// Taller than the old 28pt to match the system menu rhythm and give the
+    /// 13pt title room to breathe.
+    static let height: CGFloat = 30
+    static let inset: CGFloat = 12
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let trailingLabel = NSTextField(labelWithString: "")
@@ -495,7 +637,7 @@ private final class CommandRowView: NSView {
         titleLabel.maximumNumberOfLines = 1
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         trailingLabel.translatesAutoresizingMaskIntoConstraints = false
-        trailingLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        trailingLabel.font = Typography.rowTrailing
         trailingLabel.textColor = .tertiaryLabelColor
         trailingLabel.lineBreakMode = .byTruncatingTail
         trailingLabel.maximumNumberOfLines = 1
@@ -608,19 +750,20 @@ private final class CommandRowView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let highlight = bounds.insetBy(dx: 4, dy: 1)
+        let highlight = bounds.insetBy(dx: 5, dy: 1)
+        let radius: CGFloat = 6
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
-            let focusPath = NSBezierPath(roundedRect: highlight, xRadius: 5, yRadius: 5)
+            let focusPath = NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius)
             focusPath.lineWidth = 2
             focusPath.stroke()
         }
         guard isHovered else { return }
         // Fully opaque and using the brighter accent rather than the muted
-        // selection background: the previous 0.28 wash let the dark popover
-        // show through and read as washed-out lavender.
+        // selection background: a translucent wash would let the blurred
+        // backdrop through and read as washed-out lavender.
         NSColor.controlAccentColor.setFill()
-        NSBezierPath(roundedRect: highlight, xRadius: 5, yRadius: 5).fill()
+        NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius).fill()
     }
 
     override var isFlipped: Bool { true }
