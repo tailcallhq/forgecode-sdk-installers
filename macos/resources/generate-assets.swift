@@ -106,14 +106,15 @@ func rgb(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
     )
 }
 
-// Dark theme ([data-theme="dark"]) is used deliberately: the app icon artwork
-// is a black squircle, which disappears into the light theme's near-white
-// paper. The dark surface gives the mark a rim of contrast instead.
-let colorBgBase = rgb(0x1C1D1F)      // --primitive-gray-950 (dark --color-bg-base)
-let colorTextPrimary = rgb(0xE4E0D0) // --primitive-gray-200 (dark --color-text-primary)
-let colorTextSubtle = rgb(0xA8A088)  // --primitive-gray-400 (dark --color-text-subtle)
-let colorAccent = rgb(0xF97316)      // --primitive-orange-500 (unchanged across themes)
-let colorMonoText = rgb(0xF5DFA8)    // --primitive-sand-300 (dark --color-mono-text)
+// Light theme is used deliberately, and is NOT just an aesthetic preference:
+// Finder renders the "ForgeCode" / "Applications" icon labels itself, in a
+// color derived from the *user's* system appearance, which we cannot control
+// or query at build time. Most users run light appearance -> dark labels, so a
+// dark background makes the labels nearly unreadable (see the dark-mode DMG
+// screenshot). A light surface keeps them legible for the common case, and the
+// black squircle app icon reads well against warm paper.
+let colorBgBase = rgb(0xFAF9F5)      // --primitive-gray-50
+let colorAccent = rgb(0xF97316)      // --primitive-orange-500
 
 // Renders at 2x pixel density with a 144 DPI tag so Finder shows the image at
 // point size on both retina and non-retina displays without blur.
@@ -150,117 +151,65 @@ func renderRetinaPNG(width: Int, height: Int, draw: () -> Void) throws -> Data {
 
 // DMG window background. Coordinates are bottom-left based; the Finder window
 // content area is 660x440 and the app/Applications icons sit centered at
-// (180, 210) and (480, 210) in top-based Finder coordinates (dmg-layout.applescript).
-// The extra vertical slack (vs. the old 660x400) keeps the icon labels and the
-// footer visible even when Finder chrome (path/status bar) shrinks the content
-// area on some setups.
+// (180, 210) and (480, 210) in top-based Finder coordinates. These MUST stay in
+// sync with dmg-layout.applescript (icon positions, window bounds, icon size).
+//
+// Design intent: the background is *chrome*, not the subject. The only content
+// is the two Finder icons and the drag gesture between them; the background
+// carries nothing but the arrow linking them. No headline or wordmark — Finder
+// already labels both icons, and the drag affordance is self-evident, so extra
+// copy is redundant weight.
 func drawBackground(width: CGFloat, height: CGFloat) {
     let bounds = NSRect(x: 0, y: 0, width: width, height: height)
     colorBgBase.setFill()
     bounds.fill()
 
-    // Diagonal grid texture — the desktop app's `.grid-background` stripes,
-    // rendered at a whisper so it reads as grain, not noise. Dark theme uses
-    // white stripes (`--grid-line-color: rgba(255,255,255,0.05)`); black ones
-    // are invisible against the near-black base.
-    let stripeSpacing: CGFloat = 6
-    let stripe = NSBezierPath()
-    stripe.lineWidth = stripeSpacing / 2
-    var offset = -height
-    while offset < width + height {
-        stripe.move(to: NSPoint(x: offset, y: 0))
-        stripe.line(to: NSPoint(x: offset + height, y: height))
-        offset += stripeSpacing
-    }
-    rgb(0xFFFFFF, alpha: 0.02).setStroke()
-    stripe.stroke()
-
-    // Center row: a neural net links the two icons — a single input
-    // neuron fed by the ForgeCode icon fans out through widening,
-    // fully-connected layers (1 -> 3 -> 5 -> 6 -> 7), and the output layer
-    // wires into the Applications folder.
-    // The real Finder icons sit in the operand slots; dmg-layout.applescript
-    // positions them at the slot centers printed below (icon size 96).
-    let iconRowCenterY = height - 210
+    // Icon slots, mirrored from dmg-layout.applescript. Finder composites the
+    // real icons on top of this image at these centers.
+    let iconRowTopY: CGFloat = 210
+    let iconRowCenterY = height - iconRowTopY
     let slotSize: CGFloat = 96 // must match "icon size" in dmg-layout.applescript
-    let appCenterX = Int(180)
-    let applicationsCenterX = Int(480)
+    let appCenterX: CGFloat = 180
+    let applicationsCenterX: CGFloat = 480
 
-    // Both ends clear the Finder icons by 12pt so no neuron is ever drawn
-    // underneath an icon (Finder composites the icons on top of this image).
-    let netLeft = CGFloat(appCenterX) + slotSize / 2 + 12
-    let netRight = CGFloat(applicationsCenterX) - slotSize / 2 - 12
-    let layerCounts = [1, 3, 5, 6, 7]
-    let neuronSpacing: CGFloat = 20
-    // Non-uniform horizontal gaps. Wire count per gap grows fast
-    // (3, 15, 30, 42), so later gaps are widened to keep the *visual* wire
-    // density roughly even instead of bunching up on the right.
-    let layerGapWeights: [CGFloat] = [0.62, 0.86, 1.16, 1.36]
-    let layerXs: [CGFloat] = {
-        let span = netRight - netLeft
-        let unit = span / layerGapWeights.reduce(0, +)
-        var xs: [CGFloat] = [netLeft]
-        for weight in layerGapWeights {
-            xs.append(xs[xs.count - 1] + weight * unit)
-        }
-        return xs
-    }()
-    // Neuron centers per layer, vertically centered on the icon row.
-    let layers: [[NSPoint]] = zip(layerCounts, layerXs).map { count, lx in
-        (0..<count).map { i in
-            let offset = (CGFloat(i) - CGFloat(count - 1) / 2) * neuronSpacing
-            return NSPoint(x: lx, y: iconRowCenterY + offset)
-        }
-    }
+    // The drag path: a single horizontal arrow spanning the gap between the
+    // two icons. One clear line of motion communicates "move this there" far
+    // better than a dense graph, and it leaves the icons as the focal points.
+    // Both ends clear the icon slots so nothing is drawn under a Finder icon.
+    let gapPadding: CGFloat = 26
+    let arrowStart = appCenterX + slotSize / 2 + gapPadding
+    let arrowEnd = applicationsCenterX - slotSize / 2 - gapPadding
+    let arrowHeadLength: CGFloat = 11
+    let arrowHeadHalfHeight: CGFloat = 5.5
 
-    // Wires first (under the neurons): thin, subtle orange.
-    let wire = NSBezierPath()
-    wire.lineWidth = 1
-    // ForgeCode icon -> input neuron. The wire originates at the icon's
-    // horizontal center; the icon itself is drawn by Finder on top, so the
-    // line visually emerges from the middle of the logo.
-    wire.move(to: NSPoint(x: CGFloat(appCenterX), y: iconRowCenterY))
-    wire.line(to: layers[0][0])
-    // Fully-connected wires between adjacent layers.
-    for l in 0..<(layers.count - 1) {
-        for a in layers[l] {
-            for b in layers[l + 1] {
-                wire.move(to: a)
-                wire.line(to: b)
-            }
-        }
-    }
-    // Output layer -> Applications icon (wires converge into the folder's
-    // horizontal center; Finder draws the icon on top of them).
-    let appsCenter = NSPoint(x: CGFloat(applicationsCenterX), y: iconRowCenterY)
-    for neuron in layers[layers.count - 1] {
-        wire.move(to: neuron)
-        wire.line(to: appsCenter)
-    }
-    colorAccent.withAlphaComponent(0.35).setStroke()
-    wire.stroke()
+    // Shaft stops short of the tip so the stroke's flat end never pokes out
+    // through the filled arrowhead.
+    let shaft = NSBezierPath()
+    shaft.lineWidth = 1.5
+    shaft.lineCapStyle = .round
+    // Dashed to read as a path of travel rather than a static rule or divider.
+    shaft.setLineDash([5, 5], count: 2, phase: 0)
+    shaft.move(to: NSPoint(x: arrowStart, y: iconRowCenterY))
+    shaft.line(to: NSPoint(x: arrowEnd - arrowHeadLength + 1, y: iconRowCenterY))
+    colorAccent.withAlphaComponent(0.85).setStroke()
+    shaft.stroke()
 
-    // Neurons on top: filled orange dots with a paper-colored ring so they
-    // pop cleanly off the crossing wires.
-    let neuronRadius: CGFloat = 4.5
-    for layer in layers {
-        for center in layer {
-            let dotRect = NSRect(
-                x: center.x - neuronRadius,
-                y: center.y - neuronRadius,
-                width: neuronRadius * 2,
-                height: neuronRadius * 2
-            )
-            let ring = NSBezierPath(ovalIn: dotRect.insetBy(dx: -2, dy: -2))
-            colorBgBase.setFill()
-            ring.fill()
-            let dot = NSBezierPath(ovalIn: dotRect)
-            colorAccent.setFill()
-            dot.fill()
-        }
-    }
+    let head = NSBezierPath()
+    head.move(to: NSPoint(x: arrowEnd, y: iconRowCenterY))
+    head.line(to: NSPoint(
+        x: arrowEnd - arrowHeadLength,
+        y: iconRowCenterY + arrowHeadHalfHeight
+    ))
+    head.line(to: NSPoint(
+        x: arrowEnd - arrowHeadLength,
+        y: iconRowCenterY - arrowHeadHalfHeight
+    ))
+    head.close()
+    colorAccent.setFill()
+    head.fill()
+
     FileHandle.standardError.write(Data(
-        "icon slots: ForgeCode.app x=\(appCenterX) Applications x=\(applicationsCenterX) y=210\n".utf8
+        "icon slots: ForgeCode.app x=\(Int(appCenterX)) Applications x=\(Int(applicationsCenterX)) y=\(Int(iconRowTopY))\n".utf8
     ))
 }
 

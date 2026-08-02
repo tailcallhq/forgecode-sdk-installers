@@ -11,13 +11,14 @@ on run argv
         -- Window bounds include the title bar (28 pt on modern macOS), so add
         -- it on top of the 660x440 background/content area; otherwise the
         -- bottom of the background is clipped. The content area carries extra
-        -- vertical slack so icon labels/footer stay visible even when Finder
-        -- chrome (path/status bar) shrinks it.
+        -- vertical slack so icon labels stay visible even when Finder chrome
+        -- (path/status bar) shrinks it. Height must stay in sync with the
+        -- canvas size in generate-assets.swift.
         set bounds of volumeWindow to {100, 100, 760, 568}
         set viewOptions to icon view options of volumeWindow
         set arrangement of viewOptions to not arranged
         -- Icon size must match the slot size baked into the background
-        -- artwork's neuron/icon geometry (generate-assets.swift).
+        -- artwork's icon geometry (generate-assets.swift).
         set icon size of viewOptions to 96
         set text size of viewOptions to 13
         -- The background file must NOT be a dot-file at the volume root:
@@ -37,7 +38,7 @@ on run argv
         -- Re-apply the icon positions after the close/reopen cycle: Finder
         -- re-derives icon coordinates when the window reopens and, at detach
         -- time, flushes them to .DS_Store shifted down by the title-bar
-        -- height (+27 pt observed), which pushed the icons below the wire
+        -- height (+27 pt observed), which pushed the icons off the arrow
         -- endpoints baked into the background. Setting the positions again in
         -- the reopened window makes Finder persist the exact values.
         set position of item "ForgeCode.app" of volumeFolder to {180, 210}
