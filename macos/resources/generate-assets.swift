@@ -17,19 +17,19 @@ func savePNG(_ image: NSImage, to url: URL) throws {
     try data.write(to: url, options: .atomic)
 }
 
-// Load the brand mark from a committed hi-res raster (1024x1024 PNG) rather
-// than rasterizing the SVG at build time. AppKit's private `_NSSVGImageRep`
-// intermittently rasterizes to a fully transparent image on cold process
-// starts, which shipped a blank/generic-glyph icon in the DMG. A pre-rendered
-// PNG decodes deterministically, and `assertOpaqueCoverage` below fails the
-// build if the mark ever comes through empty again.
-func loadLogo() -> NSImage {
+// Load the app icon artwork from a committed hi-res raster (1600x1600 PNG)
+// rather than rasterizing the SVG at build time. AppKit's private
+// `_NSSVGImageRep` intermittently rasterizes to a fully transparent image on
+// cold process starts, which shipped a blank/generic-glyph icon in the DMG. A
+// pre-rendered PNG decodes deterministically, and `assertOpaqueCoverage` below
+// fails the build if the artwork ever comes through empty again.
+func loadAppIconArtwork() -> NSImage {
     let scriptURL = URL(fileURLWithPath: #filePath)
-    let logoURL = scriptURL.deletingLastPathComponent().appendingPathComponent("forgecode-logo-mark.png")
-    guard let logo = NSImage(contentsOf: logoURL) else {
-        fatalError("could not load ForgeCode logo at \(logoURL.path)")
+    let artworkURL = scriptURL.deletingLastPathComponent().appendingPathComponent("forgecode-app-icon.png")
+    guard let artwork = NSImage(contentsOf: artworkURL) else {
+        fatalError("could not load ForgeCode app icon artwork at \(artworkURL.path)")
     }
-    return logo
+    return artwork
 }
 
 // Guard against a silently empty rasterization: sample the bitmap and require
@@ -53,28 +53,46 @@ func assertOpaqueCoverage(_ image: NSImage, label: String) {
     }
 }
 
+// The artwork already carries its own squircle silhouette and background, so
+// it is composited full-bleed: no synthetic plate, no extra inset. Anything
+// else would double up rounded corners and shrink the mark.
+//
+// Draws into an explicitly sized bitmap rep rather than `lockFocus()`: the
+// focused-image path picks a backing scale from the source artwork's pixel
+// density, so a 1600px source silently produced a 2048px "1024" master.
 func icon(size: CGFloat) -> NSImage {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
-    let rect = NSRect(x: 0, y: 0, width: size, height: size)
-    let inset = size * 0.07
-    let rounded = NSBezierPath(
-        roundedRect: rect.insetBy(dx: inset, dy: inset),
-        xRadius: size * 0.21,
-        yRadius: size * 0.21
-    )
-    NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
-    rounded.fill()
+    let pixels = Int(size)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: pixels,
+        pixelsHigh: pixels,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .calibratedRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ) else { fatalError("app icon: could not allocate \(pixels)x\(pixels) bitmap") }
+    rep.size = NSSize(width: size, height: size)
 
-    let logo = loadLogo()
-    let logoInset = size * 0.25
-    logo.draw(
-        in: rect.insetBy(dx: logoInset, dy: logoInset),
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+        fatalError("app icon: could not create drawing context")
+    }
+    NSGraphicsContext.current = context
+    context.imageInterpolation = .high
+    loadAppIconArtwork().draw(
+        in: NSRect(x: 0, y: 0, width: size, height: size),
         from: .zero,
         operation: .sourceOver,
         fraction: 1
     )
-    image.unlockFocus()
+    context.flushGraphics()
+
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.addRepresentation(rep)
     return image
 }
 
