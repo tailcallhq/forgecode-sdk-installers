@@ -14,7 +14,12 @@ final class PopoverController: NSObject {
     /// The panel is width-fixed and height-fits-content: the row list is short
     /// and its length varies by state, so a fixed height would either clip the
     /// transient states or leave dead space in the steady state.
-    static let contentWidth: CGFloat = 280
+    ///
+    /// Width is drawn from AppKit: an `NSMenu` built from these exact labels
+    /// reports an intrinsic width of 171pt. 220pt keeps that headroom for the
+    /// longer transient strings ("Retry Runtime Installation") without leaving
+    /// the ~110pt of dead space the previous 280pt had.
+    static let contentWidth: CGFloat = 220
     /// Ceiling for the fitted height. Beyond this the list scrolls rather than
     /// growing into a panel taller than the states that actually occur.
     private static let maxContentHeight: CGFloat = 420
@@ -22,9 +27,9 @@ final class PopoverController: NSObject {
     /// Horizontal inset shared by rows and notes.
     private static let rowInset: CGFloat = 12
     /// Left edge shared by command titles and supporting notes.
-    private static let labelColumnInset = rowInset
+    private static let labelColumnInset: CGFloat = rowInset
     /// Corner radius of the panel. Matches the system menu silhouette.
-    private static let cornerRadius: CGFloat = 12
+    private static let cornerRadius: CGFloat = 10
     /// Gap between the menu bar and the top of the panel.
     private static let menuBarGap: CGFloat = 6
 
@@ -129,9 +134,11 @@ final class PopoverController: NSObject {
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
         // Rows carry their own internal padding, so the stack only needs a
-        // small outer margin and a hairline gap between rows.
-        bodyStack.spacing = 1
-        bodyStack.edgeInsets = NSEdgeInsets(top: 6, left: 4, bottom: 6, right: 4)
+        // small outer margin.
+        // Native menus report 22pt per item with no inter-item gap and 10pt of
+        // total chrome, so rows butt together and the panel pads 5pt each end.
+        bodyStack.spacing = 0
+        bodyStack.edgeInsets = NSEdgeInsets(top: 5, left: 4, bottom: 5, right: 4)
         bodyStack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.drawsBackground = false
@@ -218,13 +225,14 @@ final class PopoverController: NSObject {
             bodyStack.addArrangedSubview(groupSpacer())
         }
 
+        // No header or spacer ahead of this row: the switch itself is enough to
+        // mark it as a setting, so it sits flush with the command rows above.
         bodyStack.addArrangedSubview(commandRow(
             title: launchAtLoginTitle,
             action: #selector(toggleLaunchAtLoginCommand),
             isOn: loginItemState == .enabled,
             isEnabled: launchAtLoginAvailable,
-            isToggle: true,
-            trailingText: loginItemState == .enabled ? "✓" : nil
+            isToggle: true
         ))
         if loginItemState == .requiresApproval {
             bodyStack.addArrangedSubview(commandRow(
@@ -319,7 +327,9 @@ final class PopoverController: NSObject {
         row.configure(
             title: title,
             titleFont: Typography.rowTitle(prominent: isProminent),
-            trailingText: trailingText
+            trailingText: trailingText,
+            toggleState: isToggle ? isOn : nil,
+            isProminent: isProminent
         )
         row.toolTip = toolTip ?? title
         row.configureAccessibility(
@@ -545,7 +555,10 @@ final class PopoverController: NSObject {
     }
 
     private var launchAtLoginTitle: String {
-        loginItemState == .requiresApproval ? "Launch at Login — Approval Required" : "Launch at Login"
+        // The approval case is carried by the subordinate "Approve in Login
+        // Items" row plus the off/disabled switch, not by a title suffix: the
+        // suffixed string overflowed the 280pt panel and truncated.
+        "Launch at Login"
     }
 
     private var launchAtLoginAvailable: Bool {
@@ -557,26 +570,29 @@ final class PopoverController: NSObject {
 
 }
 
-/// Type scale for the menu. Sizes track the system menu bar metrics rather
-/// than the smaller control sizes the panel previously used, which rendered
-/// cramped next to native menus like the one in the reference screenshot.
+/// Type scale for the menu, matched to native menus rather than chosen by eye.
+/// `NSFont.menuFont(ofSize: 0)` reports 13pt at weight 5 (regular) on this OS,
+/// so that is what the rows use.
 enum Typography {
-    /// Row titles: 13pt medium. Regular weight at this size reads thin against
-    /// a translucent backdrop, so medium is the resting weight and semibold is
-    /// reserved for prominent (call-to-action) rows.
+    /// Row titles: 13pt regular, the system menu face.
+    ///
+    /// This was previously medium, on the theory that regular reads thin over a
+    /// translucent backdrop. It does not: vibrancy plus `labelColor` already
+    /// carries the contrast, and the extra weight simply made every row look
+    /// emphasised. Prominent rows no longer bump the weight either -- emphasis
+    /// comes from colour, which is how native menus signal it.
     static func rowTitle(prominent: Bool) -> NSFont {
         let size: CGFloat = 13
-        let weight: NSFont.Weight = prominent ? .semibold : .medium
-        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        let base = NSFont.systemFont(ofSize: size, weight: .regular)
         // The system UI face at display sizes; falls back to `base` on any OS
         // that does not vend the descriptor.
         guard let descriptor = base.fontDescriptor.withDesign(.default) else { return base }
         return NSFont(descriptor: descriptor, size: size) ?? base
     }
 
-    /// Key equivalents and checkmarks. A step down and lighter than the title,
-    /// so the shortcut column recedes.
-    static let rowTrailing = NSFont.systemFont(ofSize: 12, weight: .regular)
+    /// Key equivalents. Same size as the title so the two columns sit on a
+    /// shared optical baseline; it recedes via `tertiaryLabelColor`, not size.
+    static let rowTrailing = NSFont.systemFont(ofSize: 13, weight: .regular)
 
     /// Supporting notes and progress captions.
     static let note = NSFont.systemFont(ofSize: 11, weight: .regular)
@@ -592,13 +608,23 @@ final class MenuPanel: NSPanel {
 
 /// A full-width, text-only menu row with a rounded highlight on hover.
 private final class CommandRowView: NSView {
-    /// Taller than the old 28pt to match the system menu rhythm and give the
-    /// 13pt title room to breathe.
-    static let height: CGFloat = 30
+    /// 22pt, measured from AppKit rather than guessed: building an `NSMenu` of
+    /// N items and differencing the reported heights gives exactly 22pt per
+    /// item. The previous 30pt was ~36% taller than a native menu row.
+    static let height: CGFloat = 22
     static let inset: CGFloat = 12
+
+    /// Drives the resting title colour; see `applyContentColors()`.
+    private var isProminent = false
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let trailingLabel = NSTextField(labelWithString: "")
+    /// Only installed for toggle rows. `.mini` keeps the control inside the
+    /// 22pt row; the regular size is 22pt tall on its own and would force every
+    /// row taller to stay aligned.
+    private let toggleSwitch = NSSwitch()
+    private var showsToggle = false
+    private var titleLeading: NSLayoutConstraint!
     private weak var target: AnyObject?
     private let action: Selector
     private var trackingAreaRef: NSTrackingArea?
@@ -643,12 +669,28 @@ private final class CommandRowView: NSView {
         trailingLabel.maximumNumberOfLines = 1
         trailingLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        toggleSwitch.translatesAutoresizingMaskIntoConstraints = false
+        // `.mini` so the control fits inside the 22pt native row height; at
+        // `.small` it was ~18pt tall and dominated the panel.
+        toggleSwitch.controlSize = .mini
+        toggleSwitch.target = self
+        toggleSwitch.action = #selector(switchToggled)
+        toggleSwitch.isHidden = true
+        toggleSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
+        toggleSwitch.setContentHuggingPriority(.required, for: .horizontal)
+
         addSubview(titleLabel)
         addSubview(trailingLabel)
+        addSubview(toggleSwitch)
+
+        titleLeading = titleLabel.leadingAnchor.constraint(
+            equalTo: leadingAnchor,
+            constant: Self.inset
+        )
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            titleLeading,
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             trailingLabel.leadingAnchor.constraint(
@@ -658,9 +700,27 @@ private final class CommandRowView: NSView {
             trailingLabel.trailingAnchor.constraint(
                 equalTo: trailingAnchor,
                 constant: -Self.inset
+            ),
+            toggleSwitch.centerYAnchor.constraint(equalTo: centerYAnchor),
+            toggleSwitch.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
+            toggleSwitch.leadingAnchor.constraint(
+                greaterThanOrEqualTo: titleLabel.trailingAnchor,
+                constant: 8
             )
         ])
     }
+
+    /// The switch is a passive indicator: the entire row is the click target,
+    /// matching every other row in the panel. Routing clicks that land on the
+    /// control to the row keeps a single toggle path — otherwise the switch
+    /// would flip itself and the row's `mouseUp` would immediately flip it back.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === toggleSwitch ? self : hit
+    }
+
+    /// Only reachable via accessibility/keyboard activation of the control.
+    @objc private func switchToggled() { performAction() }
 
     func configureAccessibility(label: String, value: String?, enabled: Bool) {
         setAccessibilityLabel(label)
@@ -671,13 +731,24 @@ private final class CommandRowView: NSView {
     func configure(
         title: String,
         titleFont: NSFont,
-        trailingText: String?
+        trailingText: String?,
+        toggleState: Bool? = nil,
+        isProminent: Bool = false
     ) {
         titleLabel.stringValue = title
         titleLabel.font = titleFont
+        self.isProminent = isProminent
         applyContentColors()
-        trailingLabel.stringValue = trailingText ?? ""
-        trailingLabel.isHidden = trailingText == nil
+        showsToggle = toggleState != nil
+        toggleSwitch.isHidden = !showsToggle
+        if let toggleState {
+            toggleSwitch.state = toggleState ? .on : .off
+        }
+        // The switch occupies the trailing slot, so it suppresses any key
+        // equivalent there. No row needs both.
+        let text = showsToggle ? nil : trailingText
+        trailingLabel.stringValue = text ?? ""
+        trailingLabel.isHidden = text == nil
     }
 
     /// The hover highlight is a saturated, fully opaque fill, so row content
@@ -688,7 +759,9 @@ private final class CommandRowView: NSView {
             titleLabel.textColor = onHighlight
             trailingLabel.textColor = onHighlight.withAlphaComponent(0.75)
         } else {
-            titleLabel.textColor = .labelColor
+            // Prominence is carried by colour, not weight: native menus never
+            // bold a row, and doing so made call-to-action rows shout.
+            titleLabel.textColor = isProminent ? .controlAccentColor : .labelColor
             trailingLabel.textColor = .tertiaryLabelColor
         }
     }
