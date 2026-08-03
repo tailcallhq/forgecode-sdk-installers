@@ -28,8 +28,6 @@ final class PopoverController: NSObject {
     private static let rowInset: CGFloat = 12
     /// Left edge shared by command titles and supporting notes.
     private static let labelColumnInset: CGFloat = rowInset
-    /// Corner radius of the panel. Matches the system menu silhouette.
-    private static let cornerRadius: CGFloat = 10
     /// Gap between the menu bar and the top of the panel.
     private static let menuBarGap: CGFloat = 6
 
@@ -53,7 +51,6 @@ final class PopoverController: NSObject {
         defer: false
     )
     private let contentController = PopoverContentViewController()
-    private let backdrop = NSVisualEffectView()
     private let scrollView = NSScrollView()
     private let bodyStack = NSStackView()
     private let installationProgress = NSProgressIndicator()
@@ -113,23 +110,12 @@ final class PopoverController: NSObject {
     }
 
     private func buildRootView() -> NSView {
-        let root = backdrop
-        // `.menu` is the material the system menus themselves use, so the panel
-        // picks up the same translucency and blur rather than the flatter,
-        // heavier `.hudWindow` wash.
-        root.material = .menu
-        root.blendingMode = .behindWindow
-        root.state = .active
-        // Deliberately no explicit `appearance`: leaving it nil lets the view
-        // inherit the system light/dark setting, matching every other menu bar
-        // panel. Pinning it to .darkAqua forced a dark menu onto light-mode
-        // users.
-        root.wantsLayer = true
-        // The mask (rather than layer.cornerRadius) is what clips a
-        // behind-window blend correctly; a plain cornerRadius leaves the
-        // blurred backdrop showing square corners underneath.
-        root.maskImage = Self.roundedMask(radius: Self.cornerRadius)
-        root.translatesAutoresizingMaskIntoConstraints = false
+        // The body is assembled first and handed to the backdrop as a single
+        // content view. On macOS 26 the backdrop is an `NSGlassEffectView`,
+        // which only makes placement guarantees for its `contentView` -- the
+        // scroll view must not be a sibling of the effect.
+        let body = NSView()
+        body.translatesAutoresizingMaskIntoConstraints = false
 
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
@@ -152,14 +138,16 @@ final class PopoverController: NSObject {
         document.addSubview(bodyStack)
         scrollView.documentView = document
 
-        root.addSubview(scrollView)
+        body.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            root.widthAnchor.constraint(equalToConstant: Self.contentWidth),
-            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            // The width lives on the body, not the backdrop: the glass view
+            // derives its own geometry from its content view.
+            body.widthAnchor.constraint(equalToConstant: Self.contentWidth),
+            scrollView.topAnchor.constraint(equalTo: body.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: body.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: body.bottomAnchor),
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
@@ -171,21 +159,8 @@ final class PopoverController: NSObject {
             bodyStack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
             bodyStack.widthAnchor.constraint(equalToConstant: Self.contentWidth)
         ])
-        return root
-    }
 
-    /// A resizable rounded-rect mask. The center is stretched, so one image
-    /// serves every panel height.
-    private static func roundedMask(radius: CGFloat) -> NSImage {
-        let edge = radius * 2 + 1
-        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
+        return MenuBackdrop.makeRoot(content: body)
     }
 
     private func rebuild() {
@@ -649,6 +624,11 @@ private final class CommandRowView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
+        // macOS 26 made mini/small controls taller. The row is pinned to the
+        // 22pt native menu metric and the switch is `.mini` precisely to fit
+        // inside it, so without this the switch outgrows the row it sits in.
+        // Apple names dense popovers as the motivating case for this property.
+        if #available(macOS 26.0, *) { prefersCompactControlSizeMetrics = true }
         buildLayout()
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
@@ -751,11 +731,19 @@ private final class CommandRowView: NSView {
         trailingLabel.isHidden = text == nil
     }
 
-    /// The hover highlight is a saturated, fully opaque fill, so row content
-    /// switches to the matching foreground color to stay legible on top of it.
+    /// Row content colour follows the highlight fill; see `draw(_:)` for why
+    /// the two backdrops highlight differently.
     private func applyContentColors() {
         if isHovered {
-            let onHighlight = NSColor.alternateSelectedControlTextColor
+            let onHighlight: NSColor
+            switch MenuBackdrop.Backend.active {
+            case .glass:
+                // The softer glass highlight is not a saturated accent fill, so
+                // the label keeps the ordinary selected-text colour.
+                onHighlight = .selectedMenuItemTextColor
+            case .visualEffect:
+                onHighlight = .alternateSelectedControlTextColor
+            }
             titleLabel.textColor = onHighlight
             trailingLabel.textColor = onHighlight.withAlphaComponent(0.75)
         } else {
@@ -823,8 +811,11 @@ private final class CommandRowView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let highlight = bounds.insetBy(dx: 5, dy: 1)
-        let radius: CGFloat = 6
+        let isGlass = MenuBackdrop.Backend.active == .glass
+        // Glass menus inset the highlight further and round it more than the
+        // pre-26 menus did.
+        let highlight = bounds.insetBy(dx: isGlass ? 7 : 5, dy: 1)
+        let radius: CGFloat = isGlass ? 8 : 6
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             let focusPath = NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius)
@@ -832,10 +823,17 @@ private final class CommandRowView: NSView {
             focusPath.stroke()
         }
         guard isHovered else { return }
-        // Fully opaque and using the brighter accent rather than the muted
-        // selection background: a translucent wash would let the blurred
-        // backdrop through and read as washed-out lavender.
-        NSColor.controlAccentColor.setFill()
+        if isGlass {
+            // Over glass the opaque accent fill below reads as a hard slab: the
+            // material already carries the contrast, so macOS 26 highlights with
+            // the softer selection colour instead.
+            NSColor.selectedContentBackgroundColor.setFill()
+        } else {
+            // Fully opaque and using the brighter accent rather than the muted
+            // selection background: over `NSVisualEffectView` a translucent wash
+            // lets the blurred backdrop through and reads as washed-out lavender.
+            NSColor.controlAccentColor.setFill()
+        }
         NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius).fill()
     }
 
