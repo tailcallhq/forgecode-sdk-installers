@@ -55,6 +55,12 @@ enum MenuBackdrop {
             // behind the window; clipping the layer clips that sampling region
             // and flattens the effect into a plain blur with hard corners.
             glass.cornerRadius = radius
+            // `cornerRadius` alone only rounds the glass; the content view and
+            // its rows keep painting square right out to the bounds, so the
+            // corners read as pointy tabs poking past the curve and any row
+            // highlight squares off the top and bottom of the panel. Clipping
+            // is what makes the content follow the same silhouette.
+            glass.clipsToBounds = true
             // Assigning `contentView` also installs the Auto Layout ties
             // between the two, so the glass tracks the body's geometry.
             glass.contentView = content
