@@ -138,20 +138,32 @@ derives its geometry from `contentView`.
 
 Still needed for `NSVisualEffectView`; never applied on the glass path.
 
-### 4. Corner radius varies by backend
+### 4. Corner radius is one value for both backends
 
-`16` on glass, `10` on the legacy path, via `MenuBackdrop.cornerRadius`. The
+`MenuBackdrop.cornerRadius` is `10` on both paths; the
 `PopoverController.cornerRadius` constant is gone.
+
+This was initially `16` on glass, on the reasoning that macOS 26 rounds popovers
+more generously. Reviewing the rendered panel, that was wrong at this panel's
+size — it read as bubbled rather than native — so both backends keep the 10pt
+that matches the system menu silhouette. The row highlight geometry was reverted
+alongside it for the same reason (`dx: 5`, `radius: 6` on both paths).
 
 ### 5. Reworked hover highlight
 
 `CommandRowView.draw(_:)` filled `NSColor.controlAccentColor` fully opaque. The
 in-code rationale — a translucent wash looked washed out over
-`NSVisualEffectView` — inverts over real glass, where macOS 26 uses a softer
-fill with more inset and a larger radius. Glass now uses
-`.selectedContentBackgroundColor` at `radius: 8` and `dx: 7`, with
-`.selectedMenuItemTextColor` for the label; the legacy path keeps the opaque
-accent at `radius: 6` and `dx: 5`.
+`NSVisualEffectView` — inverts over real glass.
+
+Glass uses `.unemphasizedSelectedContentBackgroundColor`, a neutral translucent
+wash rather than a saturated accent fill, because that is how the system's own
+menu bar popovers (volume, Wi-Fi) mark a row: the accent slab was what made the
+panel read as non-native. The label stays `.labelColor` on that path —
+`.selectedMenuItemTextColor` is white and disappears into a light wash.
+
+Keyboard focus follows the same rule on glass: a filled wash rather than an
+accent-blue `keyboardFocusIndicatorColor` ring. The legacy path keeps both the
+opaque accent highlight and the focus ring it has always drawn.
 
 ### 6. Adopted `prefersCompactControlSizeMetrics`
 

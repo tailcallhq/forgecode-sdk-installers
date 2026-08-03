@@ -25,15 +25,11 @@ enum MenuBackdrop {
 
     /// Corner radius of the panel.
     ///
-    /// macOS 26 popovers are rounded noticeably more generously than the 10pt
-    /// that matched the pre-26 menu silhouette, so this tracks the backend
-    /// instead of being one fixed constant.
-    static var cornerRadius: CGFloat {
-        switch Backend.active {
-        case .glass: return 16
-        case .visualEffect: return 10
-        }
-    }
+    /// One value for both backends. A larger radius was tried on glass on the
+    /// theory that macOS 26 rounds popovers more generously, but at this panel's
+    /// size it read as overly bubbled rather than native, so both paths keep the
+    /// 10pt that matches the system menu silhouette.
+    static let cornerRadius: CGFloat = 10
 
     /// Wraps `content` in the backdrop and returns the view to use as the
     /// panel's root.

@@ -16,9 +16,10 @@ final class PopoverController: NSObject {
     /// transient states or leave dead space in the steady state.
     ///
     /// Width is drawn from AppKit: an `NSMenu` built from these exact labels
-    /// reports an intrinsic width of 171pt. 220pt keeps that headroom for the
-    /// longer transient strings ("Retry Runtime Installation") without leaving
-    /// the ~110pt of dead space the previous 280pt had.
+    /// reports an intrinsic width of 171pt. 220pt keeps headroom for the longest
+    /// steady-state row ("Update ForgeCode App") without leaving the ~110pt of
+    /// dead space the previous 280pt had. Error notes are not sized for here:
+    /// they wrap to two lines rather than widening the panel.
     static let contentWidth: CGFloat = 220
     /// Ceiling for the fitted height. Beyond this the list scrolls rather than
     /// growing into a panel taller than the states that actually occur.
@@ -193,7 +194,7 @@ final class PopoverController: NSObject {
         } else if presentation.retryInstallationEnabled {
             bodyStack.addArrangedSubview(noteView(presentation.actionableError ?? "Runtime installation failed."))
             bodyStack.addArrangedSubview(commandRow(
-                title: "Retry Runtime Installation",
+                title: "Retry Install",
                 action: #selector(retryInstallationCommand),
                 isProminent: true
             ))
@@ -355,8 +356,15 @@ final class PopoverController: NSObject {
         let label = NSTextField(labelWithString: text)
         label.font = Typography.note
         label.textColor = .tertiaryLabelColor
+        // `.byWordWrapping`, not `.byTruncatingTail`: a truncating break mode
+        // keeps the label on one line no matter what `maximumNumberOfLines`
+        // says, which clipped these notes mid-word ("...failed. Check y...").
+        // Wrapping needs an explicit `preferredMaxLayoutWidth` too, or the
+        // label reports a single-line intrinsic height and the second line is
+        // laid out but never given room.
         label.maximumNumberOfLines = 2
-        label.lineBreakMode = .byTruncatingTail
+        label.lineBreakMode = .byWordWrapping
+        label.preferredMaxLayoutWidth = Self.bodyContentWidth - Self.labelColumnInset - Self.rowInset
         label.alignment = .left
         label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(label)
@@ -738,9 +746,11 @@ private final class CommandRowView: NSView {
             let onHighlight: NSColor
             switch MenuBackdrop.Backend.active {
             case .glass:
-                // The softer glass highlight is not a saturated accent fill, so
-                // the label keeps the ordinary selected-text colour.
-                onHighlight = .selectedMenuItemTextColor
+                // The glass highlight is a neutral translucent wash, not a
+                // saturated fill, so the label stays the ordinary label colour.
+                // `.selectedMenuItemTextColor` is white and would vanish into
+                // that wash in light mode.
+                onHighlight = .labelColor
             case .visualEffect:
                 onHighlight = .alternateSelectedControlTextColor
             }
@@ -812,22 +822,35 @@ private final class CommandRowView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let isGlass = MenuBackdrop.Backend.active == .glass
-        // Glass menus inset the highlight further and round it more than the
-        // pre-26 menus did.
-        let highlight = bounds.insetBy(dx: isGlass ? 7 : 5, dy: 1)
-        let radius: CGFloat = isGlass ? 8 : 6
+        // One geometry for both backends, matching the panel's own radius
+        // decision: the wider inset and larger radius tried on glass read as
+        // over-rounded next to the system's menus.
+        let highlight = bounds.insetBy(dx: 5, dy: 1)
+        let radius: CGFloat = 6
         if window?.firstResponder === self {
-            NSColor.keyboardFocusIndicatorColor.setStroke()
-            let focusPath = NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius)
-            focusPath.lineWidth = 2
-            focusPath.stroke()
+            // A filled wash on glass rather than an accent-blue ring. System
+            // menu bar popovers mark the focused row the same way they mark the
+            // hovered one, so a saturated ring is the thing that looked bolted
+            // on; the pre-26 path keeps the ring it has always drawn.
+            if isGlass {
+                NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+                NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius).fill()
+            } else {
+                NSColor.keyboardFocusIndicatorColor.setStroke()
+                let focusPath = NSBezierPath(roundedRect: highlight, xRadius: radius, yRadius: radius)
+                focusPath.lineWidth = 2
+                focusPath.stroke()
+            }
         }
         guard isHovered else { return }
         if isGlass {
-            // Over glass the opaque accent fill below reads as a hard slab: the
-            // material already carries the contrast, so macOS 26 highlights with
-            // the softer selection colour instead.
-            NSColor.selectedContentBackgroundColor.setFill()
+            // Neutral and translucent rather than an accent fill. The system's
+            // own macOS 26 menu bar popovers (volume, Wi-Fi) highlight with a
+            // plain tinted wash and let the glass show through; a saturated
+            // accent slab is what made this panel read as non-native. This
+            // colour is the system's non-emphasised selection, so it also
+            // tracks light/dark and the user's accent-free preference.
+            NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
         } else {
             // Fully opaque and using the brighter accent rather than the muted
             // selection background: over `NSVisualEffectView` a translucent wash
