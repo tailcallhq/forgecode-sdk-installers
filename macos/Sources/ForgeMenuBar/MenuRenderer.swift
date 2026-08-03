@@ -379,6 +379,46 @@ final class PopoverController: NSObject {
         return container
     }
 
+    /// Shows the panel anchored to an arbitrary screen rect instead of a status
+    /// item. Only used by `ScreenshotMode`, which has no status bar to anchor
+    /// to; the ordinary path always goes through `toggle(relativeTo:)`.
+    func presentForCapture(below anchorRect: NSRect) {
+        rebuild()
+        let fitted = bodyStack.fittingSize.height
+        let height = min(max(fitted, 1), Self.maxContentHeight)
+        scrollView.hasVerticalScroller = fitted > Self.maxContentHeight
+        panel.setContentSize(NSSize(width: Self.contentWidth, height: height))
+        panel.setFrameOrigin(NSPoint(
+            x: anchorRect.minX - Self.leftEdgeOverhang,
+            y: anchorRect.minY - height - Self.menuBarGap
+        ))
+        panel.orderFrontRegardless()
+        visibilityState = .visible
+    }
+
+    /// The panel's pixels as composited on screen.
+    ///
+    /// Deliberately a window capture rather than `bitmapImageRepForCachingDisplay`:
+    /// a behind-window blend -- and Liquid Glass in particular -- is produced by
+    /// the window server from what sits behind the window, so a view-level
+    /// render captures the content with no material at all behind it.
+    func captureWindowImage() -> NSImage? {
+        guard panel.isVisible, panel.windowNumber > 0 else { return nil }
+        let bounds = CGRect(
+            x: panel.frame.minX,
+            y: (NSScreen.main?.frame.height ?? panel.frame.maxY) - panel.frame.maxY,
+            width: panel.frame.width,
+            height: panel.frame.height
+        )
+        guard let cgImage = CGWindowListCreateImage(
+            bounds,
+            .optionAll,
+            kCGNullWindowID,
+            [.boundsIgnoreFraming, .bestResolution]
+        ) else { return nil }
+        return NSImage(cgImage: cgImage, size: panel.frame.size)
+    }
+
     private func applyVisibilityEvent(_ event: PopoverVisibilityEvent, relativeTo button: NSStatusBarButton? = nil) {
         let transition = PopoverVisibilityReducer.reduce(state: visibilityState, event: event)
         visibilityState = transition.state

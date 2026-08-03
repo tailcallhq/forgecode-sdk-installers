@@ -17,11 +17,24 @@ enum MenuBackdrop {
         case glass
         case visualEffect
 
-        static var active: Backend {
+        /// What this OS would use on its own.
+        static var supported: Backend {
             if #available(macOS 26.0, *) { return .glass }
             return .visualEffect
         }
+
+        static var active: Backend {
+            // An override can only ever step *down* to the fallback: glass
+            // cannot be conjured on an OS whose AppKit does not have it.
+            if forced == .visualEffect { return .visualEffect }
+            return supported
+        }
     }
+
+    /// Pins the backend regardless of OS. Only the screenshot harness sets this,
+    /// so a reviewer on macOS 26 can also see what macOS 13-15 users get; the
+    /// shipping app always follows the OS.
+    static var forced: Backend?
 
     /// Corner radius of the panel.
     ///
@@ -43,7 +56,7 @@ enum MenuBackdrop {
         content.translatesAutoresizingMaskIntoConstraints = false
         let radius = cornerRadius
 
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), Backend.active == .glass {
             let glass = NSGlassEffectView()
             glass.translatesAutoresizingMaskIntoConstraints = false
             // `.regular` is the variant the HIG names for popovers: it adapts

@@ -34,6 +34,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         installApplicationMainMenu()
 
+        // Appearance review build: render the panel to disk and exit. This
+        // deliberately returns before any service, runtime, or login-item work
+        // so a capture run never installs a runtime or opens a socket.
+        if let directory = ScreenshotMode.requestedDirectory {
+            ScreenshotMode.run(outputDirectory: directory)
+            return
+        }
+
         do {
             let paths = try RuntimePaths.resolve()
             let runtimeRoot = RuntimeStore.defaultRoot()
