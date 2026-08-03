@@ -65,8 +65,8 @@ app_pid=$!
 
 waited=0
 while kill -0 "$app_pid" 2>/dev/null; do
-  if [ "$waited" -ge 180 ]; then
-    printf 'Screenshot run exceeded 180s; terminating.\n' >&2
+  if [ "$waited" -ge 300 ]; then
+    printf 'Screenshot run exceeded 300s; terminating.\n' >&2
     kill -TERM "$app_pid" 2>/dev/null
     sleep 2
     kill -KILL "$app_pid" 2>/dev/null

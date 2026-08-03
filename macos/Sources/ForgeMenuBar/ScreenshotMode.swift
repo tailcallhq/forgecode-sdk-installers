@@ -55,7 +55,20 @@ enum ScreenshotMode {
         ]
     }
 
+    /// One unit of work: a scenario crossed with a backend and an appearance.
+    private struct Shot {
+        let label: String
+        let scenario: Scenario
+        let backend: MenuBackdrop.Backend
+        let appearance: NSAppearance.Name
+    }
+
     /// Runs every scenario, writes the captures, and terminates the app.
+    ///
+    /// Called from `applicationDidFinishLaunching`, so the work is queued back
+    /// onto the main queue rather than driven inline: nesting a
+    /// `RunLoop.run(until:)` inside the run loop AppKit is still starting stalls
+    /// the app after the first capture instead of advancing to the next.
     static func run(outputDirectory: URL) {
         NSApp.setActivationPolicy(.regular)
         try? FileManager.default.createDirectory(
@@ -88,55 +101,80 @@ enum ScreenshotMode {
             backends = [("legacy", .visualEffect)]
         }
 
-        var index = 0
+        var shots: [Shot] = []
         for (backendName, backend) in backends {
-            MenuBackdrop.forced = backend
             for (appearanceName, appearance) in appearances {
-                NSApp.appearance = NSAppearance(named: appearance)
                 for scenario in scenarios {
-                    index += 1
                     let label = String(
                         format: "%@-%02d-%@-%@",
-                        backendName, index, scenario.name, appearanceName
+                        backendName, shots.count + 1, scenario.name, appearanceName
                     )
-                    capture(scenario: scenario, label: label, stage: stage, into: outputDirectory)
+                    shots.append(Shot(
+                        label: label,
+                        scenario: scenario,
+                        backend: backend,
+                        appearance: appearance
+                    ))
                 }
             }
         }
-        MenuBackdrop.forced = nil
 
-        stage.orderOut(nil)
-        FileHandle.standardError.write(
-            Data("screenshot mode: wrote \(index) captures to \(outputDirectory.path)\n".utf8)
-        )
-        NSApp.terminate(nil)
+        captureNext(shots, index: 0, written: 0, stage: stage, into: outputDirectory)
     }
 
-    private static func capture(
-        scenario: Scenario,
-        label: String,
+    /// Captures `shots[index]`, then reschedules itself for the next one.
+    private static func captureNext(
+        _ shots: [Shot],
+        index: Int,
+        written: Int,
         stage: StageWindow,
         into directory: URL
     ) {
+        guard index < shots.count else {
+            MenuBackdrop.forced = nil
+            stage.orderOut(nil)
+            FileHandle.standardError.write(
+                Data("screenshot mode: wrote \(written) captures to \(directory.path)\n".utf8)
+            )
+            NSApp.terminate(nil)
+            return
+        }
+
+        let shot = shots[index]
+        MenuBackdrop.forced = shot.backend
+        NSApp.appearance = NSAppearance(named: shot.appearance)
+
         let controller = PopoverController()
-        controller.update(snapshot: scenario.snapshot, loginItemState: scenario.loginItemState)
+        controller.update(
+            snapshot: shot.scenario.snapshot,
+            loginItemState: shot.scenario.loginItemState
+        )
         controller.presentForCapture(below: stage.anchorRectInScreen)
 
-        // One turn of the run loop so AppKit lays the panel out, and a short
-        // settle so the backdrop has sampled what is behind it before the
-        // capture. Glass composites asynchronously; capturing immediately after
-        // ordering the window front yields an untextured panel.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
-
-        if let image = controller.captureWindowImage() {
-            write(image, to: directory.appendingPathComponent("\(label).png"))
-        } else {
-            FileHandle.standardError.write(
-                Data("screenshot mode: window capture failed for \(label)\n".utf8)
-            )
+        // The settle lets AppKit lay the panel out and lets the backdrop sample
+        // what is behind it. Glass composites asynchronously, so capturing in
+        // the same turn as ordering the window front yields an untextured panel.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            var didWrite = false
+            if let image = controller.captureWindowImage() {
+                write(image, to: directory.appendingPathComponent("\(shot.label).png"))
+                didWrite = true
+            } else {
+                FileHandle.standardError.write(
+                    Data("screenshot mode: window capture failed for \(shot.label)\n".utf8)
+                )
+            }
+            controller.close()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                captureNext(
+                    shots,
+                    index: index + 1,
+                    written: written + (didWrite ? 1 : 0),
+                    stage: stage,
+                    into: directory
+                )
+            }
         }
-        controller.close()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     }
 
     private static func write(_ image: NSImage, to url: URL) {
