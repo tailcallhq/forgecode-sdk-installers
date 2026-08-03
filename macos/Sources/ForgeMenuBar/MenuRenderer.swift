@@ -224,9 +224,11 @@ final class PopoverController: NSObject {
                 action: #selector(showErrorCommand)
             ))
         }
-        // Separator fencing off the two app-level commands from the
-        // service-related rows above.
-        bodyStack.addArrangedSubview(separator())
+        // Whitespace rather than a drawn line to fence off the two app-level
+        // commands from the service rows above. An `NSBox` hairline reads as a
+        // hard border against Liquid Glass, which has no internal dividers of
+        // its own; the gap groups the rows without cutting the material.
+        bodyStack.addArrangedSubview(groupSpacer())
         bodyStack.addArrangedSubview(commandRow(
             // Deliberately not "Check for Updates": the bundled server updates
             // on its own cadence, so an unqualified label reads as though it
@@ -325,25 +327,6 @@ final class PopoverController: NSObject {
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
             container.heightAnchor.constraint(equalToConstant: 13)
-        ])
-        return container
-    }
-
-    /// A hairline divider, inset to the label column so it aligns with row text
-    /// rather than spanning the full panel edge to edge.
-    private func separator() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(line)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: Self.bodyContentWidth),
-            container.heightAnchor.constraint(equalToConstant: 11),
-            line.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Self.rowInset),
-            line.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Self.rowInset),
-            line.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
         return container
     }
