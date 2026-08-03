@@ -128,9 +128,28 @@ struct RuntimePinnedExecutable {
         envp: inout [UnsafeMutablePointer<CChar>?],
         hooks: RuntimePinnedLaunchHooks
     ) throws -> Int32 {
+        try prepareForLaunch(hooks: hooks)
+        return posix_spawn(&pid, basename, &actions, &attributes, &argv, &envp)
+    }
+
+    func prepareForLaunch(hooks: RuntimePinnedLaunchHooks) throws {
         try hooks.beforeFinalIdentityValidation()
         try validateCurrentFile()
-        return posix_spawn(&pid, basename, &actions, &attributes, &argv, &envp)
+    }
+
+    func currentFileMetadata() throws -> (device: UInt64, inode: UInt64, size: Int64) {
+        var info = stat()
+        let result = basename.withCString {
+            fstatat(directoryDescriptor, $0, &info, AT_SYMLINK_NOFOLLOW)
+        }
+        guard result == 0 else {
+            throw RuntimeFilesystemError.posix(
+                errno,
+                operation: "inspect pinned runtime executable",
+                path: displayPath
+            )
+        }
+        return (UInt64(info.st_dev), UInt64(info.st_ino), info.st_size)
     }
 
     func validateCurrentFile() throws {

@@ -8,6 +8,13 @@ import Sparkle
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static func main() {
+        // The lifecycle guardian is this same binary re-executed in an internal
+        // mode. It must be handled before any AppKit state is created: the
+        // guardian is a plain POSIX supervisor process and must never become a
+        // second menu bar app.
+        if let guardianStatus = ForgeLifecycleGuardian.runIfRequested() {
+            exit(guardianStatus)
+        }
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

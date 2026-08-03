@@ -1594,6 +1594,38 @@ final class RuntimeInstallerTests: XCTestCase {
         }
     }
 
+    func testPOSIXProcessRunnerHandlesClosedStandardDescriptorsAndDoesNotLeakSentinel() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let script = directory.url.appendingPathComponent("fd-probe.sh")
+        let resultURL = directory.url.appendingPathComponent("result")
+        try #"""
+        #!/bin/sh
+        fd="${FORGE_TEST_SENTINEL_FD}"
+        if [ -e "/dev/fd/$fd" ]; then
+          printf 'sentinel-inherited\n'
+          exit 91
+        fi
+        printf 'stdout-ok\n'
+        printf 'stderr-ok\n' >&2
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let helper = try locateRuntimeLeaseHelper()
+
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = ["--runtime-process-fd-probe", script.path, resultURL.path]
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        let result = try String(contentsOf: resultURL)
+        XCTAssertTrue(result.contains("status=0"), result)
+        XCTAssertTrue(result.contains("stdout-ok"), result)
+        XCTAssertTrue(result.contains("stderr-ok"), result)
+        XCTAssertFalse(result.contains("sentinel-inherited"), result)
+    }
+
     func testPOSIXProcessRunnerCancellationTerminatesAndReapsChild() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -1654,6 +1686,37 @@ final class RuntimeInstallerTests: XCTestCase {
         // that proves the runner does not wait for descendant pipe EOF, while
         // leaving headroom for slow shared CI runners.
         XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    func testPOSIXProcessRunnerBoundsPostReapDrainFromContinuouslyWritingEscapedDescendant() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let script = directory.url.appendingPathComponent("escape-write-pipes.sh")
+        let escapedPIDURL = directory.url.appendingPathComponent("escaped-pid")
+        try #"""
+        #!/bin/sh
+        python3 -c 'import os,sys; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); chunk=b"x"*16384; exec("while True:\n os.write(1, chunk)")' "$1" &
+        while [ ! -s "$1" ]; do sleep 0.01; done
+        exit 0
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        let started = Date()
+        let result = try await POSIXRuntimeProcessRunner().run(
+            executable: script,
+            arguments: [escapedPIDURL.path],
+            standardOutput: nil,
+            maximumStandardOutputBytes: 1_024 * 1_024,
+            timeout: 30,
+            terminationGracePeriod: 0.05
+        )
+        let elapsed = Date().timeIntervalSince(started)
+        if let escapedPID = try? Int32(String(contentsOf: escapedPIDURL).trimmingCharacters(in: .whitespacesAndNewlines)) {
+            _ = kill(escapedPID, SIGKILL)
+        }
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertLessThan(elapsed, 2, "post-reap pipe draining must have a deterministic bound")
     }
 
     func testPOSIXProcessControlNeverSignalsAfterReap() {
@@ -2784,6 +2847,19 @@ private func installFixture(version: String, data: Data, store: RuntimeStore) th
             executableSHA256: RuntimeSHA256.hexDigest(of: data)
         ),
         temporaryDirectory: temporary
+    )
+}
+
+private func locateRuntimeLeaseHelper() throws -> URL {
+    let testsURL = Bundle(for: RuntimeInstallerTests.self).bundleURL
+    let candidates = [
+        testsURL.deletingLastPathComponent().appendingPathComponent("ForgeRuntimeLeaseTestHelper"),
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/debug/ForgeRuntimeLeaseTestHelper")
+    ]
+    return try XCTUnwrap(
+        candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) },
+        "Could not locate runtime lease helper. Checked: \(candidates.map(\.path))"
     )
 }
 

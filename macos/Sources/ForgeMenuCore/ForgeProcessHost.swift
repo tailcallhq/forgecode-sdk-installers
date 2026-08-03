@@ -29,6 +29,9 @@ public struct InstalledRuntimeIdentityValidator: InstalledRuntimeIdentityValidat
 }
 
 public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
+    private static let postReapDrainBytes = 64 * 1_024
+    private static let postReapDrainInterval: TimeInterval = 0.1
+
     public struct Configuration: Sendable {
         public let environment: [String: String]
         public let logURL: URL
@@ -36,6 +39,8 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         public let retainedLogFiles: Int
         public let maximumBufferedOutputBytes: Int
         public let launchHooks: RuntimePinnedLaunchHooks
+        public let guardianExecutableURL: URL
+        public let guardianLaunchTimeout: TimeInterval
 
         public init(
             environment: [String: String] = [:],
@@ -43,7 +48,9 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             maximumLogBytes: UInt64 = 5_000_000,
             retainedLogFiles: Int = 3,
             maximumBufferedOutputBytes: Int = 256_000,
-            launchHooks: RuntimePinnedLaunchHooks = RuntimePinnedLaunchHooks()
+            launchHooks: RuntimePinnedLaunchHooks = RuntimePinnedLaunchHooks(),
+            guardianExecutableURL: URL? = nil,
+            guardianLaunchTimeout: TimeInterval = 5
         ) {
             self.environment = environment
             self.logURL = logURL
@@ -51,6 +58,29 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             self.retainedLogFiles = retainedLogFiles
             self.maximumBufferedOutputBytes = max(4_096, maximumBufferedOutputBytes)
             self.launchHooks = launchHooks
+            self.guardianExecutableURL = guardianExecutableURL
+                ?? Self.defaultGuardianExecutableURL()
+            self.guardianLaunchTimeout = max(0.1, guardianLaunchTimeout)
+        }
+
+        private static func defaultGuardianExecutableURL() -> URL {
+            // XCTest's bundle executable cannot enter the production app's
+            // internal mode. The already-built lease helper links the same
+            // core and exposes that mode solely for integration tests.
+            let bundleURL = Bundle.main.bundleURL
+            let candidates = [
+                bundleURL.deletingLastPathComponent().appendingPathComponent("ForgeRuntimeLeaseTestHelper"),
+                bundleURL.appendingPathComponent("ForgeRuntimeLeaseTestHelper"),
+                URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                    .appendingPathComponent(".build/debug/ForgeRuntimeLeaseTestHelper")
+            ]
+            if let testHelper = candidates.first(where: {
+                FileManager.default.isExecutableFile(atPath: $0.path)
+            }) {
+                return testHelper
+            }
+            return Bundle.main.executableURL
+                ?? URL(fileURLWithPath: CommandLine.arguments[0])
         }
     }
 
@@ -66,19 +96,20 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.forgecode.menubar.process-host")
     private let logWriter: RotatingLogWriter
     private var exitHandler: (@Sendable (_ status: Int32, _ runtime: TimeInterval, _ generation: UInt64) -> Void)?
-    private var pid: pid_t = 0
+    private var guardianPID: pid_t = 0
+    private var serviceIdentity: ForgeLifecycleGuardian.ProcessIdentity?
+    private var controlDescriptor: Int32 = -1
     private var startedAt: Date?
     private var lifecycleGeneration: UInt64 = 0
     private var lifecycleToken: UInt64 = 0
     private var nextLifecycleToken: UInt64 = 0
     private var stopping = false
     private var stopEscalation: DispatchWorkItem?
-    private var processSource: DispatchSourceProcess?
+    private var guardianSource: DispatchSourceProcess?
     private var outputSource: DispatchSourceRead?
     private var outputDescriptor: Int32 = -1
     private var outputBuffer = Data()
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
-    private var executionLeaseToken: RuntimeStoreLease.Token?
 
     public init(
         configuration: Configuration,
@@ -111,10 +142,22 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
     }
 
+    func lifecycleProcessIDs() -> (guardian: pid_t, service: pid_t) {
+        queue.sync { (guardianPID, serviceIdentity?.pid ?? 0) }
+    }
+
+    func closeLifecycleControlForTesting() {
+        queue.sync {
+            guard controlDescriptor >= 0 else { return }
+            Darwin.close(controlDescriptor)
+            controlDescriptor = -1
+        }
+    }
+
     public func stop(gracePeriod: TimeInterval = 3) async {
         await withCheckedContinuation { continuation in
             queue.async {
-                guard self.pid > 0 else {
+                guard self.guardianPID > 0 else {
                     continuation.resume()
                     return
                 }
@@ -122,109 +165,110 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
                 self.stopWaiters.append(continuation)
                 guard !self.stopping else { return }
                 self.stopping = true
-                let expectedPID = self.pid
+                let expectedGuardianPID = self.guardianPID
+                let expectedServiceIdentity = self.serviceIdentity
                 let expectedToken = self.lifecycleToken
-                self.logger.info("Stopping forge3 process group \(expectedPID)")
-                _ = kill(-expectedPID, SIGTERM)
+                self.logger.info("Stopping forge3 process group \(expectedServiceIdentity?.pid ?? 0) through lifecycle guardian \(expectedGuardianPID)")
+                self.requestGuardianStopLocked(gracePeriod: gracePeriod)
 
                 let escalation = DispatchWorkItem { [weak self] in
                     guard let self,
-                          self.pid == expectedPID,
+                          self.guardianPID == expectedGuardianPID,
+                          self.serviceIdentity == expectedServiceIdentity,
                           self.lifecycleToken == expectedToken,
                           self.stopping
                     else { return }
-                    self.logger.warning("forge3 did not terminate within \(String(format: "%.1f", gracePeriod)) seconds; sending SIGKILL")
-                    _ = kill(-expectedPID, SIGKILL)
-                    guard self.pid == expectedPID,
-                          self.lifecycleToken == expectedToken,
-                          self.stopping
-                    else { return }
-                    self.reapExitedProcessLocked(expectedPID, lifecycleToken: expectedToken)
+                    self.logger.warning("forge3 did not terminate within \(String(format: "%.1f", gracePeriod)) seconds; forcing process-group and guardian cleanup")
+                    // The guardian is the still-waitable process-group leader,
+                    // so its PID pins the PGID against reuse. Kill the complete
+                    // lifecycle group before reaping the guardian.
+                    _ = kill(-expectedGuardianPID, SIGKILL)
+                    self.reapGuardianLocked(expectedGuardianPID, lifecycleToken: expectedToken)
                 }
                 self.stopEscalation?.cancel()
                 self.stopEscalation = escalation
-                self.queue.asyncAfter(deadline: .now() + max(0, gracePeriod), execute: escalation)
+                self.queue.asyncAfter(deadline: .now() + max(0, gracePeriod) + 0.25, execute: escalation)
             }
         }
     }
 
     private func startLocked(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) throws {
-        guard pid == 0 else { throw ForgeCoreError.processAlreadyRunning }
+        guard guardianPID == 0 else { throw ForgeCoreError.processAlreadyRunning }
         try runtimeIdentityValidator.validate(runtime)
-        let executionLease = try lease?.acquire(.sharedExecution)
-        var retainExecutionLease = false
-        defer {
-            if !retainExecutionLease { executionLease?.release() }
-        }
         let selectedExecutable = runtime.executableURL.standardizedFileURL
         let pinnedExecutable = try RuntimePinnedExecutable(url: selectedExecutable)
         defer { pinnedExecutable.close() }
         guard FileManager.default.isExecutableFile(atPath: selectedExecutable.path) else {
             throw ForgeCoreError.missingExecutable(selectedExecutable.path)
         }
+        try pinnedExecutable.prepareForLaunch(hooks: configuration.launchHooks)
+        let metadata = try pinnedExecutable.currentFileMetadata()
 
-        var descriptors = [Int32](repeating: 0, count: 2)
-        guard pipe(&descriptors) == 0 else {
+        var controlPair = [Int32](repeating: -1, count: 2)
+        var statusPair = [Int32](repeating: -1, count: 2)
+        var outputPipe = [Int32](repeating: -1, count: 2)
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &controlPair) == 0 else {
+            throw ForgeCoreError.processLaunch("could not create guardian control socket: \(String(cString: strerror(errno)))")
+        }
+        defer { closePair(&controlPair) }
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &statusPair) == 0 else {
+            throw ForgeCoreError.processLaunch("could not create guardian status socket: \(String(cString: strerror(errno)))")
+        }
+        defer { closePair(&statusPair) }
+        guard pipe(&outputPipe) == 0 else {
             throw ForgeCoreError.processLaunch("could not create logging pipe: \(String(cString: strerror(errno)))")
         }
-        var readDescriptor = descriptors[0]
-        var writeDescriptor = descriptors[1]
-        defer {
-            if readDescriptor >= 0 { close(readDescriptor) }
-            if writeDescriptor >= 0 { close(writeDescriptor) }
-        }
-        var actions: posix_spawn_file_actions_t?
-        guard posix_spawn_file_actions_init(&actions) == 0 else {
-            throw ForgeCoreError.processLaunch("could not initialize process file actions")
-        }
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        try pinnedExecutable.addDirectoryActions(to: &actions)
-        try checkPOSIX(
-            posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
-            operation: "redirect stdin"
-        )
-        try checkPOSIX(
-            posix_spawn_file_actions_adddup2(&actions, writeDescriptor, STDOUT_FILENO),
-            operation: "redirect stdout"
-        )
-        try checkPOSIX(
-            posix_spawn_file_actions_adddup2(&actions, writeDescriptor, STDERR_FILENO),
-            operation: "redirect stderr"
-        )
-        try checkPOSIX(
-            posix_spawn_file_actions_addclose(&actions, readDescriptor),
-            operation: "close child logging input"
-        )
-        try checkPOSIX(
-            posix_spawn_file_actions_addclose(&actions, writeDescriptor),
-            operation: "close child logging output"
-        )
+        defer { closePair(&outputPipe) }
 
-        var attributes: posix_spawnattr_t?
-        guard posix_spawnattr_init(&attributes) == 0 else {
-            throw ForgeCoreError.processLaunch("could not initialize process attributes")
-        }
-        defer { posix_spawnattr_destroy(&attributes) }
-        try checkPOSIX(
-            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)),
-            operation: "enable process-group creation"
-        )
-        try checkPOSIX(
-            posix_spawnattr_setpgroup(&attributes, 0),
-            operation: "configure process group"
-        )
-
-        let arguments = [
-            pinnedExecutable.basename,
-            "--log-format", "json",
-            "ws", "--addr", endpoint.address
+        // Duplicate every child resource above the reserved range before
+        // constructing any dup2 action. Sources are therefore unique and can
+        // never be clobbered when arbitrary parent descriptors occupy 20...23
+        // or when the original source/destination graph contains a cycle.
+        let guardianSources = try [
+            duplicateForGuardian(controlPair[1]),
+            duplicateForGuardian(statusPair[1]),
+            duplicateForGuardian(outputPipe[1]),
+            duplicateForGuardian(pinnedExecutable.directoryDescriptor)
         ]
-        let environment = Self.sanitizedEnvironment(
+        defer { guardianSources.forEach { Darwin.close($0) } }
+        let guardianDestinations = [
+            ForgeLifecycleGuardian.controlDescriptor,
+            ForgeLifecycleGuardian.statusDescriptor,
+            ForgeLifecycleGuardian.outputDescriptor,
+            ForgeLifecycleGuardian.runtimeDirectoryDescriptor
+        ]
+        var actions: posix_spawn_file_actions_t?
+        try checkPOSIX(posix_spawn_file_actions_init(&actions), operation: "initialize guardian file actions")
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for (source, destination) in zip(guardianSources, guardianDestinations) {
+            try checkPOSIX(
+                posix_spawn_file_actions_adddup2(&actions, source, destination),
+                operation: "map guardian descriptor"
+            )
+        }
+        let arguments = [
+            configuration.guardianExecutableURL.path,
+            ForgeLifecycleGuardian.modeArgument,
+            selectedExecutable.path,
+            pinnedExecutable.basename,
+            String(endpoint.port),
+            String(metadata.device),
+            String(metadata.inode),
+            String(ForgeLifecycleGuardian.controlDescriptor),
+            String(ForgeLifecycleGuardian.statusDescriptor),
+            String(ForgeLifecycleGuardian.outputDescriptor),
+            String(ForgeLifecycleGuardian.runtimeDirectoryDescriptor),
+            String(UInt64(configuration.guardianLaunchTimeout * 1_000))
+        ]
+        var guardianEnvironment = Self.sanitizedEnvironment(
             inherited: ProcessInfo.processInfo.environment,
             overrides: configuration.environment
         )
-        let environmentStrings = environment.keys.sorted().compactMap { key in
-            environment[key].map { "\(key)=\($0)" }
+        if let lease {
+            guardianEnvironment["FORGE_INTERNAL_RUNTIME_LEASE_ROOT"] = lease.rootURL.path
+        }
+        let environmentStrings = guardianEnvironment.keys.sorted().compactMap { key in
+            guardianEnvironment[key].map { "\(key)=\($0)" }
         }
         var argv = arguments.map { strdup($0) } + [nil]
         var envp = environmentStrings.map { strdup($0) } + [nil]
@@ -233,42 +277,160 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             for pointer in envp where pointer != nil { free(pointer) }
         }
 
-        var spawnedPID: pid_t = 0
-        let result = try pinnedExecutable.spawn(
-            pid: &spawnedPID,
-            actions: &actions,
-            attributes: &attributes,
-            argv: &argv,
-            envp: &envp,
-            hooks: configuration.launchHooks
+        var attributes: posix_spawnattr_t?
+        try checkPOSIX(posix_spawnattr_init(&attributes), operation: "initialize guardian attributes")
+        defer { posix_spawnattr_destroy(&attributes) }
+        try checkPOSIX(
+            posix_spawnattr_setflags(
+                &attributes,
+                Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP)
+            ),
+            operation: "enable guardian process-group and close-on-exec isolation"
         )
-        close(writeDescriptor)
-        writeDescriptor = -1
-        guard result == 0 else {
-            throw ForgeCoreError.processLaunch(String(cString: strerror(result)))
-        }
+        try checkPOSIX(
+            posix_spawnattr_setpgroup(&attributes, 0),
+            operation: "make guardian the lifecycle process-group leader"
+        )
 
-        pid = spawnedPID
-        executionLeaseToken = executionLease
-        retainExecutionLease = true
-        startedAt = Date()
-        lifecycleGeneration = generation
-        nextLifecycleToken &+= 1
-        lifecycleToken = nextLifecycleToken
-        let processToken = lifecycleToken
-        stopping = false
-        stopEscalation?.cancel()
-        stopEscalation = nil
-        beginReadingOutputLocked(descriptor: readDescriptor)
-        readDescriptor = -1
-
-        let source = DispatchSource.makeProcessSource(identifier: spawnedPID, eventMask: .exit, queue: queue)
-        source.setEventHandler { [weak self] in
-            self?.reapExitedProcessLocked(spawnedPID, lifecycleToken: processToken)
+        var spawnedGuardianPID: pid_t = 0
+        let spawnResult = posix_spawn(
+            &spawnedGuardianPID,
+            configuration.guardianExecutableURL.path,
+            &actions,
+            &attributes,
+            &argv,
+            &envp
+        )
+        guard spawnResult == 0 else {
+            throw ForgeCoreError.processLaunch(String(cString: strerror(spawnResult)))
         }
-        processSource = source
-        source.resume()
-        logger.info("Started forge3 process group \(spawnedPID) from \(selectedExecutable.path) on private loopback port \(endpoint.port)")
+        close(controlPair[1]); controlPair[1] = -1
+        close(statusPair[1]); statusPair[1] = -1
+        close(outputPipe[1]); outputPipe[1] = -1
+
+        do {
+            let launchDeadline = ForgeLifecycleGuardian.deadline(
+                after: configuration.guardianLaunchTimeout
+            )
+            let packet = try readGuardianStatus(
+                descriptor: statusPair[0],
+                deadline: launchDeadline
+            )
+            guard ForgeLifecycleGuardian.validateStatusPacket(packet) else {
+                throw ForgeCoreError.processLaunch("lifecycle guardian rejected forge3 launch (\(packet.result))")
+            }
+            let identity = ForgeLifecycleGuardian.identity(from: packet)
+            try sendGuardianControlPacket(
+                ForgeLifecycleGuardian.startAcknowledgementPacket(),
+                descriptor: controlPair[0],
+                deadline: launchDeadline
+            )
+            close(statusPair[0]); statusPair[0] = -1
+
+            guardianPID = spawnedGuardianPID
+            serviceIdentity = identity
+            controlDescriptor = controlPair[0]
+            controlPair[0] = -1
+            startedAt = Date()
+            lifecycleGeneration = generation
+            nextLifecycleToken &+= 1
+            lifecycleToken = nextLifecycleToken
+            let processToken = lifecycleToken
+            stopping = false
+            stopEscalation?.cancel()
+            stopEscalation = nil
+            beginReadingOutputLocked(descriptor: outputPipe[0])
+            outputPipe[0] = -1
+
+            let source = DispatchSource.makeProcessSource(
+                identifier: spawnedGuardianPID,
+                eventMask: .exit,
+                queue: queue
+            )
+            source.setEventHandler { [weak self] in
+                self?.reapGuardianLocked(spawnedGuardianPID, lifecycleToken: processToken)
+            }
+            guardianSource = source
+            source.resume()
+            logger.info("Started forge3 process group \(packet.servicePID) through lifecycle guardian \(spawnedGuardianPID) from \(selectedExecutable.path) on private loopback port \(endpoint.port)")
+        } catch {
+            close(controlPair[0]); controlPair[0] = -1
+            close(statusPair[0]); statusPair[0] = -1
+            // Ownership begins when posix_spawn returns the guardian PID. The
+            // guardian is the new process-group leader and remains our child,
+            // so the PGID cannot be reused before waitpid. Every failed launch
+            // kills the complete lifecycle group first, then reaps the guardian.
+            _ = kill(-spawnedGuardianPID, SIGKILL)
+            while waitpid(spawnedGuardianPID, nil, 0) == -1 && errno == EINTR {}
+            throw error
+        }
+    }
+
+    private func readGuardianStatus(
+        descriptor: Int32,
+        deadline: UInt64
+    ) throws -> ForgeLifecycleGuardian.GuardianStatusPacket {
+        var packet = ForgeLifecycleGuardian.GuardianStatusPacket(
+            magic: 0,
+            result: EIO,
+            servicePID: 0,
+            serviceStartSeconds: 0,
+            serviceStartMicroseconds: 0
+        )
+        let frameResult = withUnsafeMutableBytes(of: &packet) { bytes in
+            ForgeLifecycleGuardian.readCompleteFrame(
+                descriptor: descriptor,
+                bytes: bytes,
+                deadline: deadline
+            )
+        }
+        switch frameResult {
+        case .complete:
+            return packet
+        case .closed:
+            // Status observation never consumes child ownership. The launch
+            // failure path must first signal the lifecycle group while the
+            // unreaped guardian still pins its PGID, then perform the sole
+            // waitpid below.
+            throw ForgeCoreError.processLaunch("lifecycle guardian exited before forge3 was ready")
+        case .failed:
+            throw ForgeCoreError.processLaunch("lifecycle guardian launch timed out or returned an incomplete status packet")
+        }
+    }
+
+    private func sendGuardianControlPacket(
+        _ packet: ForgeLifecycleGuardian.ControlPacket,
+        descriptor: Int32,
+        deadline: UInt64
+    ) throws {
+        var packet = packet
+        let complete = withUnsafeBytes(of: &packet) { bytes in
+            ForgeLifecycleGuardian.writeCompleteFrame(
+                descriptor: descriptor,
+                bytes: bytes,
+                deadline: deadline
+            )
+        }
+        guard complete else {
+            throw ForgeCoreError.processLaunch("could not send complete lifecycle guardian control packet")
+        }
+    }
+
+    private func requestGuardianStopLocked(gracePeriod: TimeInterval) {
+        guard controlDescriptor >= 0 else { return }
+        do {
+            try sendGuardianControlPacket(
+                ForgeLifecycleGuardian.stopPacket(gracePeriod: gracePeriod),
+                descriptor: controlDescriptor,
+                deadline: ForgeLifecycleGuardian.deadline(
+                    after: configuration.guardianLaunchTimeout
+                )
+            )
+        } catch {
+            logger.error(error.localizedDescription)
+        }
+        Darwin.close(controlDescriptor)
+        controlDescriptor = -1
     }
 
     private func beginReadingOutputLocked(descriptor: Int32) {
@@ -319,63 +481,68 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
 
     private func drainOutputLocked() {
         guard outputDescriptor >= 0 else { return }
+        // Match the bounded final-drain policy used by RuntimeProcess. An
+        // escaped session can retain this pipe and write forever after the
+        // guardian is reaped, so EOF is not a valid lifecycle completion gate.
         var bytes = [UInt8](repeating: 0, count: 16_384)
-        while true {
-            let received = read(outputDescriptor, &bytes, bytes.count)
+        var bytesRemaining = Self.postReapDrainBytes
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            &+ Self.nanoseconds(Self.postReapDrainInterval)
+        while bytesRemaining > 0,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            let requested = min(bytes.count, bytesRemaining)
+            let received = read(outputDescriptor, &bytes, requested)
             if received > 0 {
                 appendOutputLocked(bytes, count: received)
+                bytesRemaining -= received
+            } else if received == -1 && errno == EINTR {
+                continue
             } else {
                 return
             }
         }
     }
 
-    private func reapExitedProcessLocked(_ expectedPID: pid_t, lifecycleToken expectedToken: UInt64) {
-        guard pid == expectedPID, lifecycleToken == expectedToken else { return }
+    private func reapGuardianLocked(_ expectedGuardianPID: pid_t, lifecycleToken expectedToken: UInt64) {
+        guard guardianPID == expectedGuardianPID, lifecycleToken == expectedToken else { return }
         stopEscalation?.cancel()
         stopEscalation = nil
-        // The child has not been reaped yet, so its PID cannot be reused. This
-        // is the final safe point to clean up any descendants in its group.
-        _ = kill(-expectedPID, SIGKILL)
+
+        // The unreaped guardian remains the lifecycle process-group leader,
+        // pinning the PGID against reuse even if forge3 has already exited.
+        // Kill all descendants before the waitpid below releases that identity.
+        _ = kill(-expectedGuardianPID, SIGKILL)
         var status: Int32 = 0
         var waitResult: pid_t
         repeat {
-            waitResult = waitpid(expectedPID, &status, 0)
+            waitResult = waitpid(expectedGuardianPID, &status, 0)
         } while waitResult == -1 && errno == EINTR
-        guard waitResult == expectedPID || (waitResult == -1 && errno == ECHILD) else {
-            logger.error("Could not reap forge3 process \(expectedPID): \(String(cString: strerror(errno)))")
+        guard waitResult == expectedGuardianPID || (waitResult == -1 && errno == ECHILD) else {
+            logger.error("Could not reap lifecycle guardian \(expectedGuardianPID): \(String(cString: strerror(errno)))")
             return
         }
 
-        let signal = status & 0x7f
-        let exitStatus: Int32
-        if signal == 0 {
-            exitStatus = (status >> 8) & 0xff
-        } else if signal != 0x7f {
-            exitStatus = 128 + signal
-        } else {
-            exitStatus = status
-        }
-
+        let exitStatus = decodedExitStatus(status)
         let runtime = startedAt.map { Date().timeIntervalSince($0) } ?? 0
         let exitedGeneration = lifecycleGeneration
         let intentional = stopping
-        processSource?.cancel()
-        processSource = nil
-        drainOutputLocked()
+        guardianSource?.cancel()
+        guardianSource = nil
+        if controlDescriptor >= 0 { Darwin.close(controlDescriptor) }
+        controlDescriptor = -1
         outputSource?.cancel()
         outputSource = nil
+        drainOutputLocked()
         outputDescriptor = -1
         flushRemainingOutputLocked()
-        pid = 0
-        executionLeaseToken?.release()
-        executionLeaseToken = nil
+        guardianPID = 0
+        serviceIdentity = nil
         startedAt = nil
         lifecycleGeneration = 0
         lifecycleToken = 0
         stopping = false
         finishStopWaitersLocked()
-        logger.info("forge3 exited with status \(exitStatus) after \(String(format: "%.1f", runtime)) seconds")
+        logger.info("forge3 lifecycle guardian exited with status \(exitStatus) after \(String(format: "%.1f", runtime)) seconds")
         if !intentional {
             exitHandler?(exitStatus, runtime, exitedGeneration)
         }
@@ -387,12 +554,41 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         waiters.forEach { $0.resume() }
     }
 
+    private func duplicateForGuardian(_ descriptor: Int32) throws -> Int32 {
+        let duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 64)
+        guard duplicate >= 0 else {
+            throw ForgeCoreError.processLaunch(
+                "could not isolate guardian descriptor: \(String(cString: strerror(errno)))"
+            )
+        }
+        return duplicate
+    }
+
     private func checkPOSIX(_ result: Int32, operation: String) throws {
         guard result == 0 else {
             throw ForgeCoreError.processLaunch(
                 "could not \(operation): \(String(cString: strerror(result)))"
             )
         }
+    }
+
+    private func closePair(_ descriptors: inout [Int32]) {
+        for index in descriptors.indices where descriptors[index] >= 0 {
+            Darwin.close(descriptors[index])
+            descriptors[index] = -1
+        }
+    }
+
+    private func decodedExitStatus(_ status: Int32) -> Int32 {
+        let signal = status & 0x7f
+        if signal == 0 { return (status >> 8) & 0xff }
+        if signal != 0x7f { return 128 + signal }
+        return status
+    }
+
+    private static func nanoseconds(_ interval: TimeInterval) -> UInt64 {
+        let value = interval * 1_000_000_000
+        return value >= Double(UInt64.max) ? UInt64.max : UInt64(value)
     }
 
     static func sanitizedEnvironment(

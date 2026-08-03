@@ -13,6 +13,9 @@ private struct SmokeResult: Codable {
 @main
 private enum ForgeRuntimeSmokeHelper {
     static func main() async {
+        if let guardianStatus = ForgeLifecycleGuardian.runIfRequested() {
+            exit(guardianStatus)
+        }
         guard CommandLine.arguments.count == 3 else {
             FileHandle.standardError.write(Data("usage: ForgeRuntimeSmokeHelper <runtime-root> <result-json>\n".utf8))
             exit(64)

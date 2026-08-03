@@ -39,6 +39,11 @@ final class ServiceController {
         await supervisor.stopForTermination()
     }
 
+    /// A failed phase is deliberately *not* escalated to app termination. The
+    /// coupling between the app and forge3 is one-way: the guardian guarantees
+    /// forge3 dies with the app, but a forge3 failure must leave the app alive
+    /// so `ServiceSupervisor` can restart it (including the exit-75 self-update
+    /// handshake).
     private func apply(_ snapshot: ServiceSnapshot) {
         guard snapshotRevisionGate.accept(snapshot) else { return }
         self.snapshot = snapshot

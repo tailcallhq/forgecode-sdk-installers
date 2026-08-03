@@ -92,6 +92,9 @@ public extension RuntimeProcessRunning {
 }
 
 public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
+    private static let postReapDrainBytes = 64 * 1_024
+    private static let postReapDrainInterval: TimeInterval = 0.1
+
     private let launchHooks: RuntimePinnedLaunchHooks
 
     public init(launchHooks: RuntimePinnedLaunchHooks = RuntimePinnedLaunchHooks()) {
@@ -155,10 +158,20 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
         let stdoutWrite = stdoutDescriptors[1]
         let stderrRead = stderrDescriptors[0]
         let stderrWrite = stderrDescriptors[1]
+        var isolatedWrites: [Int32] = []
+        do {
+            isolatedWrites.append(try Self.duplicateSpawnSource(stdoutWrite))
+            isolatedWrites.append(try Self.duplicateSpawnSource(stderrWrite))
+        } catch {
+            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite] + isolatedWrites)
+            throw error
+        }
+        let isolatedStdoutWrite = isolatedWrites[0]
+        let isolatedStderrWrite = isolatedWrites[1]
 
         var actions: posix_spawn_file_actions_t?
         guard posix_spawn_file_actions_init(&actions) == 0 else {
-            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite])
+            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite] + isolatedWrites)
             throw RuntimeInstallerError.processFailure("could not initialize process file actions")
         }
         defer { posix_spawn_file_actions_destroy(&actions) }
@@ -171,18 +184,16 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 operation: "redirect stdin"
             )
             try Self.checkPOSIX(
-                posix_spawn_file_actions_adddup2(&actions, stdoutWrite, STDOUT_FILENO),
+                posix_spawn_file_actions_adddup2(&actions, isolatedStdoutWrite, STDOUT_FILENO),
                 operation: "redirect stdout"
             )
             try Self.checkPOSIX(
-                posix_spawn_file_actions_adddup2(&actions, stderrWrite, STDERR_FILENO),
+                posix_spawn_file_actions_adddup2(&actions, isolatedStderrWrite, STDERR_FILENO),
                 operation: "redirect stderr"
             )
             for (descriptor, operation) in [
-                (stdoutRead, "close child stdout input"),
-                (stdoutWrite, "close child stdout output"),
-                (stderrRead, "close child stderr input"),
-                (stderrWrite, "close child stderr output")
+                (isolatedStdoutWrite, "close isolated child stdout source"),
+                (isolatedStderrWrite, "close isolated child stderr source")
             ] {
                 try Self.checkPOSIX(
                     posix_spawn_file_actions_addclose(&actions, descriptor),
@@ -190,7 +201,7 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 )
             }
         } catch {
-            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite])
+            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite] + isolatedWrites)
             throw error
         }
 
@@ -202,15 +213,18 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
         defer { posix_spawnattr_destroy(&attributes) }
         do {
             try Self.checkPOSIX(
-                posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)),
-                operation: "enable process-group creation"
+                posix_spawnattr_setflags(
+                    &attributes,
+                    Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+                ),
+                operation: "enable process-group creation and close-on-exec isolation"
             )
             try Self.checkPOSIX(
                 posix_spawnattr_setpgroup(&attributes, 0),
                 operation: "configure process group"
             )
         } catch {
-            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite])
+            Self.closeDescriptors([stdoutRead, stdoutWrite, stderrRead, stderrWrite] + isolatedWrites)
             throw error
         }
 
@@ -256,10 +270,12 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
             close(stderrWrite)
             close(stdoutRead)
             close(stderrRead)
+            Self.closeDescriptors(isolatedWrites)
             throw error
         }
         close(stdoutWrite)
         close(stderrWrite)
+        Self.closeDescriptors(isolatedWrites)
         guard spawnResult == 0 else {
             close(stdoutRead)
             close(stderrRead)
@@ -364,10 +380,23 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 readers.leave()
             }
             var bytes = [UInt8](repeating: 0, count: 16 * 1_024)
+            var postReapBytesRemaining = postReapDrainBytes
+            var postReapDeadline: UInt64?
             while true {
                 let reaped = control.isReaped
+                if reaped, postReapDeadline == nil {
+                    postReapDeadline = deadline(after: postReapDrainInterval)
+                }
+                if let postReapDeadline,
+                   postReapBytesRemaining <= 0 || DispatchTime.now().uptimeNanoseconds >= postReapDeadline {
+                    return
+                }
                 var descriptor = pollfd(fd: stdoutDescriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
-                let pollResult = poll(&descriptor, 1, reaped ? 0 : 50)
+                let pollResult = poll(
+                    &descriptor,
+                    1,
+                    postReapDeadline.map { pollTimeout(deadline: $0) } ?? 50
+                )
                 if pollResult == 0 {
                     if reaped { return }
                     continue
@@ -378,6 +407,7 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 }
                 let received = read(stdoutDescriptor, &bytes, bytes.count)
                 if received > 0 {
+                    if reaped { postReapBytesRemaining -= received }
                     let accepted = lock.withLock { () -> Int in
                         let remaining = max(0, maximumStandardOutputBytes - outputBytes)
                         let count = min(received, remaining)
@@ -405,10 +435,23 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 readers.leave()
             }
             var bytes = [UInt8](repeating: 0, count: 16 * 1_024)
+            var postReapBytesRemaining = postReapDrainBytes
+            var postReapDeadline: UInt64?
             while true {
                 let reaped = control.isReaped
+                if reaped, postReapDeadline == nil {
+                    postReapDeadline = deadline(after: postReapDrainInterval)
+                }
+                if let postReapDeadline,
+                   postReapBytesRemaining <= 0 || DispatchTime.now().uptimeNanoseconds >= postReapDeadline {
+                    return
+                }
                 var descriptor = pollfd(fd: stderrDescriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
-                let pollResult = poll(&descriptor, 1, reaped ? 0 : 50)
+                let pollResult = poll(
+                    &descriptor,
+                    1,
+                    postReapDeadline.map { pollTimeout(deadline: $0) } ?? 50
+                )
                 if pollResult == 0 {
                     if reaped { return }
                     continue
@@ -419,6 +462,7 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
                 }
                 let received = read(stderrDescriptor, &bytes, bytes.count)
                 if received > 0 {
+                    if reaped { postReapBytesRemaining -= received }
                     lock.withLock {
                         let remaining = max(0, maximumStandardOutputBytes - stderr.count)
                         stderr.append(contentsOf: bytes.prefix(min(received, remaining)))
@@ -471,8 +515,29 @@ public struct POSIXRuntimeProcessRunner: RuntimeIdentityPinnedProcessRunning {
         return value >= Double(UInt64.max) ? UInt64.max : UInt64(value)
     }
 
+    private static func deadline(after interval: TimeInterval) -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds &+ nanoseconds(interval)
+    }
+
+    private static func pollTimeout(deadline: UInt64) -> Int32 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline else { return 0 }
+        let milliseconds = (deadline - now + 999_999) / 1_000_000
+        return Int32(min(UInt64(Int32.max), milliseconds))
+    }
+
+    private static func duplicateSpawnSource(_ descriptor: Int32) throws -> Int32 {
+        let duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 64)
+        guard duplicate >= 0 else {
+            throw RuntimeInstallerError.processFailure(
+                "could not isolate process descriptor: \(String(cString: strerror(errno)))"
+            )
+        }
+        return duplicate
+    }
+
     private static func closeDescriptors(_ descriptors: [Int32]) {
-        descriptors.forEach { close($0) }
+        descriptors.filter { $0 >= 0 }.forEach { close($0) }
     }
 
     private static func checkPOSIX(_ result: Int32, operation: String) throws {
