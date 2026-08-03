@@ -101,9 +101,19 @@ if [ -z "$shot_count" ] || [ "$shot_count" -eq 0 ] 2>/dev/null; then
 fi
 printf 'Capturing %s shot(s), one process each...\n' "$shot_count"
 
+# Retried once because failures observed on CI were sporadic and per-process
+# rather than systematic: a run produced 17 of 20, with the gaps scattered
+# rather than clustered. Shots are independent, so re-running one is safe and
+# cannot corrupt the others.
 i=0
 while [ "$i" -lt "$shot_count" ]; do
+  before=$(find "$OUTPUT_DIR" -name '*.png' -type f | wc -l | tr -d ' ')
   run_shot "$i"
+  after=$(find "$OUTPUT_DIR" -name '*.png' -type f | wc -l | tr -d ' ')
+  if [ "$after" -eq "$before" ]; then
+    printf 'shot %s produced no image; retrying once.\n' "$i" >&2
+    run_shot "$i"
+  fi
   i=$((i + 1))
 done
 

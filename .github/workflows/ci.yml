@@ -189,7 +189,8 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.screenshots.outcome }}" = "success" ]; then
-            echo "::notice::Captured menu panel screenshots on macOS ${{ matrix.os }}."
+            n=$(find macos/dist/screenshots -name '*.png' -type f 2>/dev/null | wc -l | tr -d ' ')
+            echo "::notice::Captured $n menu panel screenshot(s) on macOS ${{ matrix.os }}."
           else
             echo "::warning::Screenshot capture failed on macOS ${{ matrix.os }}; no images were produced. See the capture step log."
           fi
