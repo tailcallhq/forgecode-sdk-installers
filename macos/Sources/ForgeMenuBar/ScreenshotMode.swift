@@ -204,11 +204,21 @@ enum ScreenshotMode {
         case .glass: native = "NSGlassEffectView (Liquid Glass)"
         case .visualEffect: native = "NSVisualEffectView (.menu)"
         }
+        // Liquid Glass is a real-time refraction shader. Three things switch it
+        // off or flatten it, none of which are visible in the image itself, so
+        // they are recorded rather than left to be guessed at from a screenshot:
+        // Reduce Transparency (which Increase Contrast silently forces on), the
+        // absence of GPU acceleration, and a 1x virtual display.
+        let workspace = NSWorkspace.shared
+        let reduceTransparency = workspace.accessibilityDisplayShouldReduceTransparency
+        let increaseContrast = workspace.accessibilityDisplayShouldIncreaseContrast
         let report = """
         os version        : \(process.operatingSystemVersionString)
         native backend    : \(native)
         NSGlassEffectView : \(NSClassFromString("NSGlassEffectView") == nil ? "absent" : "present")
         screens           : \(NSScreen.screens.map { "\($0.frame.size) @\($0.backingScaleFactor)x" })
+        reduceTransparency: \(reduceTransparency)\(reduceTransparency ? "  <-- GLASS IS DISABLED; these captures are not representative" : "")
+        increaseContrast  : \(increaseContrast)\(increaseContrast && !reduceTransparency ? "  <-- forces reduceTransparency on" : "")
 
         Files are prefixed by the backend that rendered them:
           glass-*  : NSGlassEffectView, what macOS 26 users see
@@ -222,6 +232,13 @@ enum ScreenshotMode {
         NOTE: Liquid Glass samples content behind the window. These captures put
         a synthetic pattern behind the panel for that reason; the material will
         look different over a real desktop.
+
+        DO NOT judge glass translucency from a CI capture. Glass is a real-time
+        refraction shader that needs GPU acceleration, and hosted runners are
+        virtualized: with software rendering it degrades to something flatter
+        and more opaque than real hardware, or does not draw at all. These
+        images are reliable for layout, wording, colour and corner radius --
+        not for how glassy the material looks. Confirm that on a real Mac.
 
         """
         try? report.write(
