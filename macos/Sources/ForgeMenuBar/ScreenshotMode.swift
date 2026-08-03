@@ -7,8 +7,17 @@ import Foundation
 ///
 /// The panel's backdrop is chosen at runtime (`MenuBackdrop`), and on macOS 26
 /// it is Liquid Glass, which cannot be judged from source or from a unit test.
-/// This mode drives the real `PopoverController` through a set of states and
-/// captures each one so CI on a macOS 26 runner can publish the images.
+/// This mode drives the real `PopoverController` and captures the result so CI
+/// can publish the images.
+///
+/// **One shot per process.** The process renders exactly the shot named by
+/// `FORGE_SCREENSHOT_INDEX` and exits. Earlier revisions looped over every shot
+/// in a single launch and reliably wedged after the first capture on CI -- the
+/// panel is a non-activating borderless window driven from an accessory app, and
+/// keeping that state clean across twenty presentations in one process proved
+/// unreliable in a runner's synthetic GUI session. Re-launching per shot means a
+/// wedge costs one image and a timeout instead of the whole run, and every
+/// capture starts from identical process state.
 ///
 /// Activated by `FORGE_SCREENSHOT_DIR`; the app otherwise never enters this
 /// path, and the service is never started while it is active.
@@ -18,6 +27,13 @@ enum ScreenshotMode {
         guard let raw = ProcessInfo.processInfo.environment["FORGE_SCREENSHOT_DIR"],
               !raw.isEmpty else { return nil }
         return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+    }
+
+    /// Which shot to render, or `nil` to print the plan and exit.
+    private static var requestedIndex: Int? {
+        guard let raw = ProcessInfo.processInfo.environment["FORGE_SCREENSHOT_INDEX"],
+              let value = Int(raw) else { return nil }
+        return value
     }
 
     /// One captured case: a panel state crossed with an appearance.
@@ -63,36 +79,16 @@ enum ScreenshotMode {
         let appearance: NSAppearance.Name
     }
 
-    /// Runs every scenario, writes the captures, and terminates the app.
+    /// Every shot this OS can produce, in a stable order.
     ///
-    /// Called from `applicationDidFinishLaunching`, so the work is queued back
-    /// onto the main queue rather than driven inline: nesting a
-    /// `RunLoop.run(until:)` inside the run loop AppKit is still starting stalls
-    /// the app after the first capture instead of advancing to the next.
-    static func run(outputDirectory: URL) {
-        NSApp.setActivationPolicy(.regular)
-        try? FileManager.default.createDirectory(
-            at: outputDirectory,
-            withIntermediateDirectories: true
-        )
-
-        writeEnvironmentReport(to: outputDirectory)
-
-        // Liquid Glass refracts and samples whatever is behind the window, so a
-        // capture taken over an empty grey desktop shows almost nothing. This
-        // puts a known, high-contrast pattern behind the panel so the material
-        // has something to pick up and the effect is actually visible.
-        let stage = StageWindow()
-        stage.orderFrontRegardless()
-
+    /// On macOS 26 both materials are reachable, so both appear: the glass the
+    /// OS would pick, and the fallback that macOS 13-15 users actually see.
+    /// Below 26 only the fallback exists.
+    private static var shots: [Shot] {
         let appearances: [(String, NSAppearance.Name)] = [
             ("light", .aqua),
             ("dark", .darkAqua)
         ]
-
-        // On macOS 26 both materials are reachable, so both are captured: the
-        // glass the OS would pick, and the fallback that macOS 13-15 users
-        // actually see. Below 26 only the fallback exists.
         let backends: [(String, MenuBackdrop.Backend)]
         switch MenuBackdrop.Backend.supported {
         case .glass:
@@ -101,15 +97,15 @@ enum ScreenshotMode {
             backends = [("legacy", .visualEffect)]
         }
 
-        var shots: [Shot] = []
+        var result: [Shot] = []
         for (backendName, backend) in backends {
             for (appearanceName, appearance) in appearances {
                 for scenario in scenarios {
                     let label = String(
                         format: "%@-%02d-%@-%@",
-                        backendName, shots.count + 1, scenario.name, appearanceName
+                        backendName, result.count + 1, scenario.name, appearanceName
                     )
-                    shots.append(Shot(
+                    result.append(Shot(
                         label: label,
                         scenario: scenario,
                         backend: backend,
@@ -118,31 +114,53 @@ enum ScreenshotMode {
                 }
             }
         }
-
-        captureNext(shots, index: 0, written: 0, stage: stage, into: outputDirectory)
+        return result
     }
 
-    /// Captures `shots[index]`, then reschedules itself for the next one.
-    private static func captureNext(
-        _ shots: [Shot],
-        index: Int,
-        written: Int,
-        stage: StageWindow,
-        into directory: URL
-    ) {
-        guard index < shots.count else {
-            MenuBackdrop.forced = nil
-            stage.orderOut(nil)
-            FileHandle.standardError.write(
-                Data("screenshot mode: wrote \(written) captures to \(directory.path)\n".utf8)
+    /// Renders the requested shot and terminates.
+    ///
+    /// With no `FORGE_SCREENSHOT_INDEX` the process instead prints the shot
+    /// count and exits, which is how the driver script learns how many times to
+    /// re-launch it.
+    static func run(outputDirectory: URL) {
+        let plan = shots
+
+        guard let index = requestedIndex else {
+            // Plan mode: report the count on stdout, write the environment
+            // report, and exit without touching the window server.
+            try? FileManager.default.createDirectory(
+                at: outputDirectory,
+                withIntermediateDirectories: true
             )
+            writeEnvironmentReport(to: outputDirectory)
+            print(plan.count)
             NSApp.terminate(nil)
             return
         }
 
-        let shot = shots[index]
+        guard index >= 0, index < plan.count else {
+            FileHandle.standardError.write(
+                Data("screenshot mode: index \(index) out of range (\(plan.count) shots)\n".utf8)
+            )
+            exit(2)
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        try? FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let shot = plan[index]
         MenuBackdrop.forced = shot.backend
         NSApp.appearance = NSAppearance(named: shot.appearance)
+
+        // Liquid Glass refracts and samples whatever is behind the window, so a
+        // capture taken over an empty grey desktop shows almost nothing. This
+        // puts a known, high-contrast pattern behind the panel so the material
+        // has something to pick up and the effect is actually visible.
+        let stage = StageWindow()
+        stage.orderFrontRegardless()
 
         let controller = PopoverController()
         controller.update(
@@ -154,26 +172,19 @@ enum ScreenshotMode {
         // The settle lets AppKit lay the panel out and lets the backdrop sample
         // what is behind it. Glass composites asynchronously, so capturing in
         // the same turn as ordering the window front yields an untextured panel.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            var didWrite = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             if let image = controller.captureWindowImage() {
-                write(image, to: directory.appendingPathComponent("\(shot.label).png"))
-                didWrite = true
+                write(image, to: outputDirectory.appendingPathComponent("\(shot.label).png"))
+                FileHandle.standardError.write(Data("wrote \(shot.label).png\n".utf8))
             } else {
                 FileHandle.standardError.write(
                     Data("screenshot mode: window capture failed for \(shot.label)\n".utf8)
                 )
             }
-            controller.close()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                captureNext(
-                    shots,
-                    index: index + 1,
-                    written: written + (didWrite ? 1 : 0),
-                    stage: stage,
-                    into: directory
-                )
-            }
+            // exit() rather than NSApp.terminate(): termination runs the app
+            // delegate's shutdown path, and this process must not be able to
+            // linger holding the window server session the next launch needs.
+            exit(0)
         }
     }
 

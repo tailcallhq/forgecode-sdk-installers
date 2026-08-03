@@ -55,32 +55,64 @@ if [ -z "$console_uid" ]; then
 fi
 printf 'Rendering in GUI session for uid %s...\n' "$console_uid"
 
-# The app writes the captures and terminates itself. The timeout is a backstop
-# against it hanging and stalling the job.
-set +e
-launchctl asuser "$console_uid" \
-  env FORGE_SCREENSHOT_DIR="$OUTPUT_DIR" \
-  "$binary" &
-app_pid=$!
-
-waited=0
-while kill -0 "$app_pid" 2>/dev/null; do
-  if [ "$waited" -ge 300 ]; then
-    printf 'Screenshot run exceeded 300s; terminating.\n' >&2
-    kill -TERM "$app_pid" 2>/dev/null
-    sleep 2
-    kill -KILL "$app_pid" 2>/dev/null
-    break
+# Launches the app once for a single shot, bounded by its own timeout.
+#
+# One process per shot: a single process looping over every shot wedged after
+# the first capture on CI, and one hang then cost the entire run. Isolating them
+# means a wedge costs one image, and each capture starts from clean process
+# state. $1 is the shot index, or empty to ask the app for the shot count.
+run_shot() {
+  shot_index=${1:-}
+  set +e
+  if [ -n "$shot_index" ]; then
+    launchctl asuser "$console_uid" \
+      env FORGE_SCREENSHOT_DIR="$OUTPUT_DIR" FORGE_SCREENSHOT_INDEX="$shot_index" \
+      "$binary" &
+  else
+    launchctl asuser "$console_uid" \
+      env FORGE_SCREENSHOT_DIR="$OUTPUT_DIR" \
+      "$binary" >"$OUTPUT_DIR/.plan" &
   fi
-  sleep 2
-  waited=$((waited + 2))
+  app_pid=$!
+
+  waited=0
+  while kill -0 "$app_pid" 2>/dev/null; do
+    if [ "$waited" -ge 30 ]; then
+      printf 'shot %s exceeded 30s; terminating.\n' "${shot_index:-plan}" >&2
+      kill -TERM "$app_pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$app_pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$app_pid" 2>/dev/null
+  set -e
+}
+
+# Ask the app how many shots this OS can produce. The count varies: macOS 26
+# renders both the glass and the forced fallback, older systems only the latter.
+run_shot ""
+shot_count=$(tr -dc '0-9' <"$OUTPUT_DIR/.plan" 2>/dev/null || echo "")
+rm -f "$OUTPUT_DIR/.plan"
+if [ -z "$shot_count" ] || [ "$shot_count" -eq 0 ] 2>/dev/null; then
+  fail "could not determine the shot count; the app did not report a plan"
+fi
+printf 'Capturing %s shot(s), one process each...\n' "$shot_count"
+
+i=0
+while [ "$i" -lt "$shot_count" ]; do
+  run_shot "$i"
+  i=$((i + 1))
 done
-wait "$app_pid" 2>/dev/null
-set -e
 
 count=$(find "$OUTPUT_DIR" -name '*.png' -type f | wc -l | tr -d ' ')
 if [ "$count" -eq 0 ]; then
   fail "no screenshots were produced in $OUTPUT_DIR"
+fi
+if [ "$count" -lt "$shot_count" ]; then
+  printf 'WARNING: %s of %s shots produced an image.\n' "$count" "$shot_count" >&2
 fi
 
 if [ -f "$OUTPUT_DIR/environment.txt" ]; then
