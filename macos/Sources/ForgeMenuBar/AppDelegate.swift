@@ -58,16 +58,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let paths = try RuntimePaths.resolve()
-            let runtimeRoot = RuntimeStore.defaultRoot()
-            let runtimeLease = RuntimeStoreLease(rootURL: runtimeRoot)
             let runtimeInstaller = DeveloperOverrideRuntimeInstaller.wrapIfOverridden(
-                base: RuntimeInstaller(rootURL: runtimeRoot),
+                base: RuntimeInstaller(),
                 logger: logger
             )
             let processHost = ForgeProcessHost(
                 configuration: .init(logURL: paths.serviceLog),
-                logger: logger,
-                lease: runtimeLease
+                logger: logger
             )
             let supervisor = ServiceSupervisor(
                 processHost: processHost,

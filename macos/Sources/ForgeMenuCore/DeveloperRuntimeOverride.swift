@@ -1,11 +1,10 @@
 import Foundation
 
 /// Debug-only escape hatch that points the supervisor at a locally built
-/// `forge3` instead of the managed runtime store.
+/// `forge3` instead of running the upstream shell installer.
 ///
 /// This exists so a developer can iterate on the runtime without publishing a
-/// release and without hand-editing the private store (which is checksum- and
-/// permission-validated, and silently re-downloaded when validation fails).
+/// release and without running the installer at all.
 ///
 /// The entire mechanism is compiled out of release builds: `resolve` returns
 /// `nil` unconditionally when `DEBUG` is not defined, so a shipped app cannot be
@@ -15,11 +14,7 @@ import Foundation
 ///
 ///     FORGE_RUNTIME_BINARY=/path/to/forge3 .build/debug/ForgeMenuBar
 ///
-/// Note that the launch-time safety checks in `RuntimePinnedExecutable` still
-/// apply to the override: the binary must be a regular file owned by the current
-/// user, with no hard links, no group/other write permission, the owner execute
-/// bit set, and no symlink or group/other-writable directory anywhere along the
-/// path below the user boundary.
+/// The override must be an absolute path to an executable regular file.
 public enum DeveloperRuntimeOverride {
     public static let environmentKey = "FORGE_RUNTIME_BINARY"
 

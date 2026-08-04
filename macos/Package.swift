@@ -8,9 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ForgeMenuCore", targets: ["ForgeMenuCore"]),
-        .executable(name: "ForgeMenuBar", targets: ["ForgeMenuBar"]),
-        .executable(name: "ForgeRuntimeSmokeHelper", targets: ["ForgeRuntimeSmokeHelper"]),
-        .executable(name: "ForgeRuntimeLeaseTestHelper", targets: ["ForgeRuntimeLeaseTestHelper"])
+        .executable(name: "ForgeMenuBar", targets: ["ForgeMenuBar"])
     ],
     dependencies: [],
     targets: [
@@ -34,16 +32,6 @@ let package = Package(
                 // scripts/assemble-app.sh; the executable must search there.
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
-        ),
-        .executableTarget(
-            name: "ForgeRuntimeSmokeHelper",
-            dependencies: ["ForgeMenuCore"],
-            path: "Sources/ForgeRuntimeSmokeHelper"
-        ),
-        .executableTarget(
-            name: "ForgeRuntimeLeaseTestHelper",
-            dependencies: ["ForgeMenuCore"],
-            path: "Sources/ForgeRuntimeLeaseTestHelper"
         ),
         .testTarget(
             name: "ForgeMenuCoreTests",
