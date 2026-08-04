@@ -101,6 +101,18 @@ When the app launches and first requires the service, ForgeCode installs the run
 forge3 --log-format json ws --addr 127.0.0.1:<first-free-port-from-9753>
 ```
 
+### Running a locally built runtime (debug builds only)
+
+Set `FORGE_RUNTIME_BINARY` to an absolute path to launch your own `forge3` instead of the managed runtime. No download, staging, or store validation runs, and the store is left untouched:
+
+```text
+FORGE_RUNTIME_BINARY=/path/to/forge3 .build/debug/ForgeMenuBar
+```
+
+This is compiled out of release builds — `DeveloperRuntimeOverride.resolve` returns `nil` unconditionally when `DEBUG` is not defined, so a shipped app cannot be redirected to an arbitrary binary. An unset variable is ignored; a variable that is set but does not point at an executable regular file fails loudly rather than silently falling back to the downloaded runtime. The launch-boundary checks still apply to the override: the binary must be a regular, single-link, current-owner, non-group/world-writable, owner-executable file reached through a no-symlink private path. The override reports version `0.0.0` so it never registers as an upgrade.
+
+Because a GUI launch from Finder or Dock does not inherit your shell environment, this variable — like `FORGE_CONSOLE_ORIGIN` — is only visible when the executable is launched directly from a terminal.
+
 The ForgeCode installer does not poll for newer runtimes at app startup or in the background. The app's own lifetime is the desired state: the service is started at launch and stopped on termination. Unexpected exits and readiness failures use bounded exponential restart backoff. Stop and app termination use bounded `TERM`, `KILL`, and child reaping, with best-effort process-group cleanup. The runtime environment is allowlisted instead of copied wholesale, and JSON-aware/text fallback redaction is applied before bounded rotating logs are stored in `~/Library/Logs/ForgeMenuBar/`.
 
 The active app does not poll usage, extensions, models, or providers. Readiness and health are probed with a single one-shot `rpc.discover` request per lifecycle: a successful round trip marks the service ready, and `result.data.complete["rpc.discover"].info.version` supplies the server version shown in the header. Failures inside the readiness window retry on a short poll interval; persistent failure fails the lifecycle and triggers a supervised restart. Process and probe generations prevent late responses from superseded work from updating current state. Stopping the service clears all service-derived state.

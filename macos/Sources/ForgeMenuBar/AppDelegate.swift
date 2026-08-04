@@ -19,11 +19,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Sparkle drives application self-updates from the appcast feed declared
     // in Info.plist (SUFeedURL) and verifies each download against the
     // embedded EdDSA public key (SUPublicEDKey) plus Developer ID signing.
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    //
+    // Sparkle requires a real .app bundle. When the executable is run directly
+    // out of `.build/<config>/ForgeMenuBar` there is no bundle, so Sparkle
+    // fails to configure itself and tries to report that through an `NSAlert`,
+    // which in turn crashes inside ImageIO while loading the nib's icon. Skip
+    // the updater entirely in that case so the runtime can be developed
+    // unbundled; packaged builds are unaffected.
+    private let updaterController: SPUStandardUpdaterController? = {
+        guard AppDelegate.isRunningInApplicationBundle else { return nil }
+        return SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }()
+
+    /// True only when the executable is loaded from a `.app` whose Info.plist
+    /// actually declares the Sparkle feed.
+    private static var isRunningInApplicationBundle: Bool {
+        let bundle = Bundle.main
+        guard bundle.bundleURL.pathExtension == "app",
+              bundle.bundleIdentifier != nil,
+              let feed = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              !feed.isEmpty
+        else { return false }
+        return true
+    }
     private var statusItem: NSStatusItem!
     private var popoverController: PopoverController!
     private var serviceController: ServiceController!
@@ -38,7 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let paths = try RuntimePaths.resolve()
             let runtimeRoot = RuntimeStore.defaultRoot()
             let runtimeLease = RuntimeStoreLease(rootURL: runtimeRoot)
-            let runtimeInstaller = RuntimeInstaller(rootURL: runtimeRoot)
+            let runtimeInstaller = DeveloperOverrideRuntimeInstaller.wrapIfOverridden(
+                base: RuntimeInstaller(rootURL: runtimeRoot),
+                logger: logger
+            )
             let processHost = ForgeProcessHost(
                 configuration: .init(logURL: paths.serviceLog),
                 logger: logger,
@@ -142,17 +167,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu(title: "Main Menu")
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
-        // Kept verbatim in sync with the panel row in MenuRenderer: both invoke
-        // the same Sparkle check, and the label is scoped to the app so it is
-        // not read as covering the separately-updated server runtime.
-        let checkForUpdates = NSMenuItem(
-            title: "Update ForgeCode App",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
-            keyEquivalent: ""
-        )
-        checkForUpdates.target = updaterController
-        appMenu.addItem(checkForUpdates)
-        appMenu.addItem(.separator())
+        if let updaterController {
+            // Kept verbatim in sync with the panel row in MenuRenderer: both invoke
+            // the same Sparkle check, and the label is scoped to the app so it is
+            // not read as covering the separately-updated server runtime.
+            let checkForUpdates = NSMenuItem(
+                title: "Update ForgeCode App",
+                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                keyEquivalent: ""
+            )
+            checkForUpdates.target = updaterController
+            appMenu.addItem(checkForUpdates)
+            appMenu.addItem(.separator())
+        }
         let quit = NSMenuItem(
             title: "Quit",
             action: #selector(NSApplication.terminate(_:)),
@@ -167,6 +194,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkForUpdates() {
+        guard let updaterController else {
+            logger.warning("Ignoring update check: the app is not running from an application bundle")
+            return
+        }
         // The update alert is an ordinary window; an accessory app must
         // activate so the panel actually comes to the front.
         NSApp.activate(ignoringOtherApps: true)
