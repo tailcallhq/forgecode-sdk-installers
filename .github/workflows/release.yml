@@ -158,8 +158,8 @@ jobs:
           echo "BUILD_NUMBER=$version" >> "$GITHUB_ENV"
           suffix=""
           [ "$MODE" = "signed" ] || suffix="-unsigned"
-          echo "DMG_NAME=ForgeCode-$version$suffix" >> "$GITHUB_ENV"
-          echo "dmg_file=ForgeCode-$version$suffix.dmg" >> "$GITHUB_OUTPUT"
+          echo "DMG_NAME=ForgeCode3$suffix" >> "$GITHUB_ENV"
+          echo "dmg_file=ForgeCode3$suffix.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Import signing certificate
         if: steps.mode.outputs.mode == 'signed'
@@ -529,7 +529,7 @@ jobs:
           release=$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,assets)
           [ "$(jq -r '.isDraft' <<< "$release")" = "true" ] \
             || { echo "target release is not a draft: $TAG_NAME" >&2; exit 1; }
-          jq -r '.assets[].name | select(. == "appcast.xml" or (startswith("ForgeCode-") and endswith(".dmg")))' <<< "$release" \
+          jq -r '.assets[].name | select(. == "appcast.xml" or (startswith("ForgeCode") and endswith(".dmg")))' <<< "$release" \
             | while IFS= read -r asset; do
                 gh release delete-asset "$TAG_NAME" "$asset" --repo "$GITHUB_REPOSITORY" --yes
               done
