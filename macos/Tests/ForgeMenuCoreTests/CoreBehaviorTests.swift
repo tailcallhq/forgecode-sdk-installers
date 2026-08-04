@@ -37,6 +37,57 @@ final class CoreBehaviorTests: XCTestCase {
         XCTAssertThrowsError(try ConsoleURLBuilder.validateOrigin("https://user@example.com"))
     }
 
+    func testDeveloperRuntimeOverrideIsCompiledOutOfReleaseBuilds() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("override-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("forge3")
+        try Data("#!/bin/sh\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+        let environment = [DeveloperRuntimeOverride.environmentKey: executable.path]
+        let resolved = try DeveloperRuntimeOverride.resolve(environment: environment)
+
+#if DEBUG
+        XCTAssertEqual(resolved?.executableURL, executable.standardizedFileURL)
+        XCTAssertEqual(resolved?.version.rawValue, "0.0.0")
+        XCTAssertEqual(resolved?.architecture, .native)
+#else
+        XCTAssertNil(resolved, "the override must not be honoured in release builds")
+#endif
+
+        // No override configured resolves to nil in every configuration.
+        XCTAssertNil(try DeveloperRuntimeOverride.resolve(environment: [:]))
+        XCTAssertNil(try DeveloperRuntimeOverride.resolve(
+            environment: [DeveloperRuntimeOverride.environmentKey: "   "]
+        ))
+    }
+
+    func testDeveloperRuntimeOverrideRejectsInvalidPaths() throws {
+#if DEBUG
+        XCTAssertThrowsError(try DeveloperRuntimeOverride.resolve(
+            environment: [DeveloperRuntimeOverride.environmentKey: "relative/forge3"]
+        ))
+        XCTAssertThrowsError(try DeveloperRuntimeOverride.resolve(
+            environment: [DeveloperRuntimeOverride.environmentKey: "/nonexistent/forge3"]
+        ))
+        // A directory is not a valid executable.
+        XCTAssertThrowsError(try DeveloperRuntimeOverride.resolve(
+            environment: [DeveloperRuntimeOverride.environmentKey: NSTemporaryDirectory()]
+        ))
+        // A non-executable regular file is rejected.
+        let plain = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("plain-\(UUID().uuidString)")
+        try Data("x".utf8).write(to: plain)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plain.path)
+        defer { try? FileManager.default.removeItem(at: plain) }
+        XCTAssertThrowsError(try DeveloperRuntimeOverride.resolve(
+            environment: [DeveloperRuntimeOverride.environmentKey: plain.path]
+        ))
+#endif
+    }
+
     func testConsoleURLCarriesConnectEndpoint() throws {
         let origin = try ConsoleURLBuilder.validateOrigin("https://console.forgecode.dev")
         let endpoint = LoopbackEndpoint(port: 9_755)
