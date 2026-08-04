@@ -36,7 +36,7 @@ SPARKLE_EMBED_EXCLUDES="Headers Modules PrivateHeaders XPCServices"
 # allowing this declarative, app-runtime-only configuration value.
 SPARKLE_FEED_URL=${SPARKLE_FEED_URL:-"https:""//github.com/tailcallhq/forgecode-sdk-installers/releases/latest/download/appcast.xml"}
 SPARKLE_PUBLIC_ED_KEY=${SPARKLE_PUBLIC_ED_KEY:-"HHU4iqquKHbx0NZBmhLdUWteSNm+dHezZ4TwgArcbNk="}
-DMG_NAME=${DMG_NAME:-"ForgeCode-$APP_VERSION"}
+DMG_NAME=${DMG_NAME:-"ForgeCode3"}
 BUILD_FLAVOR=${BUILD_FLAVOR:-unsigned}
 case "$BUILD_FLAVOR" in
   unsigned|signed) ;;
