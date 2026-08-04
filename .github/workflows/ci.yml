@@ -17,13 +17,22 @@ concurrency:
 jobs:
   test:
     name: Test and Package (unsigned)
-    runs-on: macos-latest
+    # Pinned rather than macos-latest: the app now compiles against macOS 26
+    # SDK symbols (NSGlassEffectView), and `-latest` moves between OS versions
+    # on GitHub's own schedule. Pinning keeps CI and release on one SDK.
+    runs-on: macos-26
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
 
       - name: Cache Swift build
         uses: actions/cache@v4
@@ -56,3 +65,132 @@ jobs:
             macos/dist/unsigned/manifest.txt
             macos/dist/unsigned/SHA256SUMS
           if-no-files-found: error
+
+  # Deliberately independent of `test`: this only needs a binary, not a verified
+  # release, so it does not wait on the test suite or on packaging. Reviewers get
+  # images in about a minute instead of after the full pipeline.
+  screenshot-build:
+    name: Build screenshot executable
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Cache Swift build
+        uses: actions/cache@v4
+        with:
+          path: macos/.build
+          key: swift-screenshots-${{ runner.os }}-${{ hashFiles('macos/Package.swift', 'macos/Sources/**', 'macos/tools/fetch-sparkle.sh') }}
+          restore-keys: |
+            swift-screenshots-${{ runner.os }}-
+
+      - name: Vendor Sparkle (pinned checksum)
+        working-directory: macos
+        run: tools/fetch-sparkle.sh
+
+      # Built once against the newest SDK and handed to the capture jobs below,
+      # so every OS renders the same binary a user would actually run.
+      - name: Build screenshot executable
+        working-directory: macos
+        run: swift build --configuration debug --product ForgeMenuBar
+
+      # The executable links Sparkle with an @rpath of ../Frameworks relative to
+      # itself, so the framework has to travel with it: a bare binary aborts at
+      # launch with "Library not loaded: @rpath/Sparkle.framework". This mirrors
+      # the layout assemble-app.sh produces inside the app bundle.
+      - name: Stage screenshot executable with its framework
+        working-directory: macos
+        run: |
+          set -eu
+          rm -rf screenshot-stage
+          mkdir -p screenshot-stage/MacOS screenshot-stage/Frameworks
+          cp .build/debug/ForgeMenuBar screenshot-stage/MacOS/
+          cp -R Vendor/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework \
+            screenshot-stage/Frameworks/
+          # Tarred because upload-artifact follows symlinks rather than
+          # preserving them, which would flatten the framework's
+          # Versions/Current layout and the executable bit along with it.
+          tar -czf screenshot-stage.tar.gz -C screenshot-stage .
+
+      - name: Upload screenshot executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-binary
+          path: macos/screenshot-stage.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # The panel's backdrop is chosen at runtime, so reviewing it means running it.
+  # The app supports macOS 13+, and the fallback material is what the majority
+  # of that range sees, so captures run across every macOS the hosted runners
+  # offer rather than only the newest.
+  screenshots:
+    name: Screenshots (macOS ${{ matrix.os }})
+    needs: screenshot-build
+    strategy:
+      fail-fast: false
+      matrix:
+        # Hosted arm64 images available above the app's macOS 13 floor. macOS 14
+        # is deprecated by GitHub and macOS 13 is gone entirely, so the legacy
+        # material cannot be exercised below 15 on hosted infrastructure; that
+        # gap is covered by forcing the fallback on newer runners.
+        os: ["26", "15"]
+    runs-on: macos-${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download screenshot executable
+        uses: actions/download-artifact@v4
+        with:
+          name: screenshot-binary
+          path: prebuilt
+
+      - name: Unpack screenshot executable
+        run: |
+          set -eu
+          mkdir -p prebuilt/app
+          tar -xzf prebuilt/screenshot-stage.tar.gz -C prebuilt/app
+          chmod +x prebuilt/app/MacOS/ForgeMenuBar
+          otool -L prebuilt/app/MacOS/ForgeMenuBar | head
+
+      # A review aid, not a gate: a capture failure says nothing about whether
+      # the app is correct, and older images may lack a usable GUI session. The
+      # outcome is surfaced as a warning below rather than silently passing,
+      # because a job that goes green while producing no images is worse than
+      # one that fails honestly.
+      - name: Capture menu panel screenshots
+        id: screenshots
+        continue-on-error: true
+        working-directory: macos
+        env:
+          BINARY: ${{ github.workspace }}/prebuilt/app/MacOS/ForgeMenuBar
+          OUTPUT_DIR: ${{ github.workspace }}/macos/dist/screenshots
+        run: scripts/capture-screenshots.sh
+
+      - name: Upload menu panel screenshots
+        if: always() && steps.screenshots.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: menu-panel-screenshots-macos-${{ matrix.os }}
+          path: macos/dist/screenshots
+          if-no-files-found: error
+
+      - name: Report capture outcome
+        if: always()
+        run: |
+          if [ "${{ steps.screenshots.outcome }}" = "success" ]; then
+            n=$(find macos/dist/screenshots -name '*.png' -type f 2>/dev/null | wc -l | tr -d ' ')
+            echo "::notice::Captured $n menu panel screenshot(s) on macOS ${{ matrix.os }}."
+          else
+            echo "::warning::Screenshot capture failed on macOS ${{ matrix.os }}; no images were produced. See the capture step log."
+          fi

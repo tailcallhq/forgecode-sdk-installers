@@ -84,7 +84,10 @@ jobs:
           && needs.draft_release.result == 'success'
           && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.macos == 'true'))
       )
-    runs-on: macos-latest
+    # Pinned rather than macos-latest: the app compiles against macOS 26 SDK
+    # symbols (NSGlassEffectView) and `-latest` moves between OS versions on
+    # GitHub's schedule. Release must build on the same SDK as CI.
+    runs-on: macos-26
     timeout-minutes: 45
     permissions:
       contents: read
@@ -370,7 +373,10 @@ jobs:
       && needs.draft_release.result == 'success'
       && needs.build_release.result == 'success'
       && needs.notarize_release.result == 'success'
-    runs-on: macos-latest
+    # Pinned rather than macos-latest: the app compiles against macOS 26 SDK
+    # symbols (NSGlassEffectView) and `-latest` moves between OS versions on
+    # GitHub's schedule. Release must build on the same SDK as CI.
+    runs-on: macos-26
     timeout-minutes: 20
     permissions:
       contents: read
