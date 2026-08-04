@@ -155,8 +155,8 @@ jobs:
           echo "BUILD_NUMBER=$version" >> "$GITHUB_ENV"
           suffix=""
           [ "$MODE" = "signed" ] || suffix="-unsigned"
-          echo "DMG_NAME=ForgeCode$suffix" >> "$GITHUB_ENV"
-          echo "dmg_file=ForgeCode$suffix.dmg" >> "$GITHUB_OUTPUT"
+          echo "DMG_NAME=ForgeCode3$suffix" >> "$GITHUB_ENV"
+          echo "dmg_file=ForgeCode3$suffix.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Import signing certificate
         if: steps.mode.outputs.mode == 'signed'
