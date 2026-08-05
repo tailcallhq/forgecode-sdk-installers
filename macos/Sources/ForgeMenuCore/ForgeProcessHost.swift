@@ -7,27 +7,6 @@ public protocol ForgeProcessHosting: AnyObject, Sendable {
     func stop(gracePeriod: TimeInterval) async
 }
 
-public protocol InstalledRuntimeIdentityValidating: Sendable {
-    func validate(_ runtime: InstalledRuntime) throws
-}
-
-public struct InstalledRuntimeIdentityValidator: InstalledRuntimeIdentityValidating {
-    private let expectedUserID: uid_t
-
-    public init(expectedUserID: uid_t = geteuid()) {
-        self.expectedUserID = expectedUserID
-    }
-
-    public func validate(_ runtime: InstalledRuntime) throws {
-        let pinned = try RuntimePinnedExecutable(
-            url: runtime.executableURL,
-            expectedUserID: expectedUserID
-        )
-        defer { pinned.close() }
-        try pinned.validateCurrentFile()
-    }
-}
-
 public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     public struct Configuration: Sendable {
         public let environment: [String: String]
@@ -35,22 +14,19 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         public let maximumLogBytes: UInt64
         public let retainedLogFiles: Int
         public let maximumBufferedOutputBytes: Int
-        public let launchHooks: RuntimePinnedLaunchHooks
 
         public init(
             environment: [String: String] = [:],
             logURL: URL,
             maximumLogBytes: UInt64 = 5_000_000,
             retainedLogFiles: Int = 3,
-            maximumBufferedOutputBytes: Int = 256_000,
-            launchHooks: RuntimePinnedLaunchHooks = RuntimePinnedLaunchHooks()
+            maximumBufferedOutputBytes: Int = 256_000
         ) {
             self.environment = environment
             self.logURL = logURL
             self.maximumLogBytes = maximumLogBytes
             self.retainedLogFiles = retainedLogFiles
             self.maximumBufferedOutputBytes = max(4_096, maximumBufferedOutputBytes)
-            self.launchHooks = launchHooks
         }
     }
 
@@ -61,8 +37,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
 
     private let configuration: Configuration
     private let logger: AppLogger
-    private let runtimeIdentityValidator: any InstalledRuntimeIdentityValidating
-    private let lease: RuntimeStoreLease?
     private let queue = DispatchQueue(label: "dev.forgecode.menubar.process-host")
     private let logWriter: RotatingLogWriter
     private var exitHandler: (@Sendable (_ status: Int32, _ runtime: TimeInterval, _ generation: UInt64) -> Void)?
@@ -78,18 +52,13 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     private var outputDescriptor: Int32 = -1
     private var outputBuffer = Data()
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
-    private var executionLeaseToken: RuntimeStoreLease.Token?
 
     public init(
         configuration: Configuration,
-        logger: AppLogger = .shared,
-        runtimeIdentityValidator: any InstalledRuntimeIdentityValidating = InstalledRuntimeIdentityValidator(),
-        lease: RuntimeStoreLease? = nil
+        logger: AppLogger = .shared
     ) {
         self.configuration = configuration
         self.logger = logger
-        self.runtimeIdentityValidator = runtimeIdentityValidator
-        self.lease = lease
         self.logWriter = RotatingLogWriter(
             fileManager: .default,
             logURL: configuration.logURL,
@@ -150,15 +119,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
 
     private func startLocked(runtime: InstalledRuntime, endpoint: LoopbackEndpoint, generation: UInt64) throws {
         guard pid == 0 else { throw ForgeCoreError.processAlreadyRunning }
-        try runtimeIdentityValidator.validate(runtime)
-        let executionLease = try lease?.acquire(.sharedExecution)
-        var retainExecutionLease = false
-        defer {
-            if !retainExecutionLease { executionLease?.release() }
-        }
         let selectedExecutable = runtime.executableURL.standardizedFileURL
-        let pinnedExecutable = try RuntimePinnedExecutable(url: selectedExecutable)
-        defer { pinnedExecutable.close() }
         guard FileManager.default.isExecutableFile(atPath: selectedExecutable.path) else {
             throw ForgeCoreError.missingExecutable(selectedExecutable.path)
         }
@@ -178,7 +139,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             throw ForgeCoreError.processLaunch("could not initialize process file actions")
         }
         defer { posix_spawn_file_actions_destroy(&actions) }
-        try pinnedExecutable.addDirectoryActions(to: &actions)
         try checkPOSIX(
             posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
             operation: "redirect stdin"
@@ -215,7 +175,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         )
 
         let arguments = [
-            pinnedExecutable.basename,
+            selectedExecutable.lastPathComponent,
             "--log-format", "json",
             "ws", "--addr", endpoint.address
         ]
@@ -234,13 +194,13 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
 
         var spawnedPID: pid_t = 0
-        let result = try pinnedExecutable.spawn(
-            pid: &spawnedPID,
-            actions: &actions,
-            attributes: &attributes,
-            argv: &argv,
-            envp: &envp,
-            hooks: configuration.launchHooks
+        let result = posix_spawn(
+            &spawnedPID,
+            selectedExecutable.path,
+            &actions,
+            &attributes,
+            &argv,
+            &envp
         )
         close(writeDescriptor)
         writeDescriptor = -1
@@ -249,8 +209,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
 
         pid = spawnedPID
-        executionLeaseToken = executionLease
-        retainExecutionLease = true
         startedAt = Date()
         lifecycleGeneration = generation
         nextLifecycleToken &+= 1
@@ -368,8 +326,6 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         outputDescriptor = -1
         flushRemainingOutputLocked()
         pid = 0
-        executionLeaseToken?.release()
-        executionLeaseToken = nil
         startedAt = nil
         lifecycleGeneration = 0
         lifecycleToken = 0
@@ -404,7 +360,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             "LANG", "LC_ALL", "LC_CTYPE", "TZ",
             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"
         ]
-        let allowedPrefixes = ["FORGE_", "RUST_LOG"]
+        let allowedPrefixes = ["FORGE_", "FORGE3_", "RUST_LOG"]
         var result = inherited.filter { key, _ in
             allowedExact.contains(key) || allowedPrefixes.contains { key.hasPrefix($0) }
         }

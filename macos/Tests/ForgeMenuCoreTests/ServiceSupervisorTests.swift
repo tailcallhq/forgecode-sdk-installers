@@ -194,7 +194,7 @@ private final class SequenceRuntimeInstaller: RuntimeInstalling, @unchecked Send
     func installLatest(
         progress: @escaping @Sendable (RuntimeInstallationPhase) async -> Void
     ) async throws -> InstalledRuntime {
-        throw RuntimeInstallerError.network("unexpected install")
+        throw ThinInstallerError.download("unexpected install")
     }
 }
 
@@ -262,126 +262,6 @@ private actor StubRPCClient: ForgeRPCClientProtocol {
     }
 
     func versionCalls() -> Int { versionCallCount }
-}
-
-private actor SupervisorRuntimeNetwork: RuntimeNetworkClient {
-    private let responses: [URL: Data]
-    private(set) var requestedURLs: [URL] = []
-
-    init(responses: [URL: Data]) {
-        self.responses = responses
-    }
-
-    func download(
-        _ request: RuntimeDownloadRequest,
-        progress: @escaping RuntimeDownloadProgressHandler
-    ) async throws -> RuntimeDownload {
-        requestedURLs.append(request.url)
-        guard let data = responses[request.url] else {
-            throw RuntimeInstallerError.network("unexpected test URL")
-        }
-        await progress(0, Int64(data.count))
-        await progress(Int64(data.count), Int64(data.count))
-        return RuntimeDownload(data: data, responseURL: request.url)
-    }
-
-    func requestCount() -> Int { requestedURLs.count }
-}
-
-private final class FailOncePermissionCommitHook: @unchecked Sendable {
-    private let lock = NSLock()
-    private var shouldFail = true
-
-    func failIfNeeded(path: String) throws {
-        try lock.withLock {
-            guard shouldFail else { return }
-            shouldFail = false
-            throw RuntimeFilesystemError.posix(
-                EACCES,
-                operation: "commit staged runtime",
-                path: path
-            )
-        }
-    }
-}
-
-private final class SupervisorRuntimeValidator: RuntimeExecutableValidating, @unchecked Sendable {
-    func validate(executableURL: URL, expectedArchitecture: RuntimeArchitecture) throws {}
-}
-
-private struct SupervisorQuarantineManager: RuntimeQuarantineManaging {
-    func hasQuarantine(
-        at executableURL: URL,
-        expectedIdentity: RuntimeExecutableIdentity
-    ) throws -> Bool {
-        false
-    }
-
-    func refreshExecutableRemovingQuarantine(
-        from executableURL: URL,
-        expectedIdentity: RuntimeExecutableIdentity
-    ) throws -> RuntimeExecutableIdentity {
-        XCTFail("unexpected quarantine refresh")
-        return expectedIdentity
-    }
-}
-
-private actor SupervisorRuntimeArchive: RuntimeArchiveHandling {
-    private let executable: Data
-
-    init(executable: Data) {
-        self.executable = executable
-    }
-
-    func inspect(
-        archiveURL: URL,
-        temporaryDirectory: URL,
-        limits: RuntimeInstallerLimits
-    ) async throws -> RuntimeArchiveInspection {
-        let tarURL = temporaryDirectory.appendingPathComponent("supervisor-fixture.tar")
-        let tar = supervisorTar(executable: executable)
-        try tar.write(to: tarURL)
-        return try SafeTarXZArchiveHandler.parseTar(tar, tarURL: tarURL, limits: limits)
-    }
-
-    nonisolated func extractExecutable(
-        from inspection: RuntimeArchiveInspection,
-        to destination: URL
-    ) throws {
-        try executable.write(to: destination)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: destination.path
-        )
-    }
-}
-
-private func supervisorTar(executable: Data) -> Data {
-    var header = Data(repeating: 0, count: 512)
-    writeSupervisorTar("package/forge3", to: &header, range: 0..<100)
-    writeSupervisorTar("0000700\0", to: &header, range: 100..<108)
-    writeSupervisorTar("0000000\0", to: &header, range: 108..<116)
-    writeSupervisorTar("0000000\0", to: &header, range: 116..<124)
-    writeSupervisorTar(String(format: "%011o\0", executable.count), to: &header, range: 124..<136)
-    writeSupervisorTar("00000000000\0", to: &header, range: 136..<148)
-    writeSupervisorTar("        ", to: &header, range: 148..<156)
-    header[156] = Character("0").asciiValue!
-    writeSupervisorTar("ustar\0", to: &header, range: 257..<263)
-    writeSupervisorTar("00", to: &header, range: 263..<265)
-    writeSupervisorTar(String(format: "%06o\0 ", header.reduce(0) { $0 + Int($1) }), to: &header, range: 148..<156)
-
-    var tar = header
-    tar.append(executable)
-    if executable.count % 512 != 0 {
-        tar.append(Data(repeating: 0, count: 512 - executable.count % 512))
-    }
-    tar.append(Data(repeating: 0, count: 1_024))
-    return tar
-}
-
-private func writeSupervisorTar(_ string: String, to data: inout Data, range: Range<Int>) {
-    let bytes = Array(string.utf8.prefix(range.count))
-    data.replaceSubrange(range.lowerBound..<(range.lowerBound + bytes.count), with: bytes)
 }
 
 final class ServiceSupervisorTests: XCTestCase {
@@ -697,7 +577,7 @@ final class ServiceSupervisorTests: XCTestCase {
         let installer = StubRuntimeInstaller(
             current: nil,
             results: [
-                .failure(RuntimeInstallerError.network("offline")),
+                .failure(ThinInstallerError.download("offline")),
                 .success(runtime)
             ]
         )
@@ -727,49 +607,18 @@ final class ServiceSupervisorTests: XCTestCase {
         await supervisor.stopForTermination()
     }
 
-    func testPermissionFailureCleansStagingAndRetryAutoLaunchesInstalledRuntime() async throws {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("forge-supervisor-permission-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: base,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
-        defer {
-            makeSupervisorTreeOwnerWritable(base)
-            try? FileManager.default.removeItem(at: base)
-        }
-
-        let version = try XCTUnwrap(RuntimeReleaseVersion(rawValue: "1.2.3"))
-        let root = base.appendingPathComponent("runtime", isDirectory: true)
-        let archiveData = Data("permission-retry-archive".utf8)
-        let archiveURL = RuntimeReleaseURLs.archive(version: version, architecture: .arm64)
-        let checksumURL = RuntimeReleaseURLs.checksum(version: version, architecture: .arm64)
-        let network = SupervisorRuntimeNetwork(responses: [
-            RuntimeReleaseURLs.latestManifest: Data("{\"version\":\"1.2.3\"}".utf8),
-            archiveURL: archiveData,
-            checksumURL: Data(
-                "\(RuntimeSHA256.hexDigest(of: archiveData)) *\(RuntimeArchitecture.arm64.archiveName)\n".utf8
-            )
-        ])
-        let validator = SupervisorRuntimeValidator()
-        let permissionFault = FailOncePermissionCommitHook()
-        let store = RuntimeStore(
-            rootURL: root,
-            validator: validator,
-            commitHooks: .init(beforeActivationRename: {
-                try permissionFault.failIfNeeded(path: root.appendingPathComponent("current").path)
-            })
-        )
-        let installer = RuntimeInstaller(
-            architecture: .arm64,
-            dependencies: .init(
-                network: network,
-                store: store,
-                archive: SupervisorRuntimeArchive(executable: Data("forge3-fixture".utf8)),
-                validator: validator,
-                quarantineManager: SupervisorQuarantineManager()
-            )
+    func testFilesystemFailureMapsToActionableErrorAndRetryAutoLaunches() async throws {
+        let runtime = StubRuntimeInstaller.fixture(path: "/fs-retry/forge3")
+        let installer = StubRuntimeInstaller(
+            current: nil,
+            results: [
+                .failure(ThinInstallerError.filesystem(
+                    operation: "create the forge3 install directory",
+                    path: "/tmp/forge3",
+                    failure: .permissionDenied
+                )),
+                .success(runtime)
+            ]
         )
         let process = RecordingProcessHost()
         let supervisor = ServiceSupervisor(
@@ -798,30 +647,12 @@ final class ServiceSupervisorTests: XCTestCase {
         )
         XCTAssertTrue(failedPresentation.retryInstallationEnabled)
         XCTAssertTrue(process.recordedExecutables().isEmpty)
-        let failedRequestCount = await network.requestCount()
-        XCTAssertEqual(failedRequestCount, 3)
-
-        let temporaryRoot = root.appendingPathComponent("tmp", isDirectory: true)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path), [])
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: root.appendingPathComponent("versions/1.2.3/arm64", isDirectory: true).path
-            ),
-            "a failed real-store commit must roll back the moved staging directory"
-        )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("current").path))
 
         await supervisor.retryInstallation()
-        let expectedExecutable = root.appendingPathComponent("versions/1.2.3/arm64/forge3")
-        let didLaunch = await waitUntil {
-            process.recordedExecutables() == [expectedExecutable]
-        }
+        let didLaunch = await waitUntil { process.recordedExecutables() == [runtime.executableURL] }
         XCTAssertTrue(didLaunch)
-        XCTAssertEqual(process.recordedExecutables(), [expectedExecutable])
-        let retriedRequestCount = await network.requestCount()
-        XCTAssertEqual(retriedRequestCount, 6)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path), [])
-        XCTAssertEqual(try store.current(architecture: .arm64)?.executableURL, expectedExecutable)
+        XCTAssertEqual(installer.calls(), 2)
+        XCTAssertEqual(process.recordedExecutables(), [runtime.executableURL])
         await supervisor.stopForTermination()
     }
 
@@ -1149,23 +980,6 @@ private final class Locked<Value>: @unchecked Sendable {
     init(_ value: Value) { stored = value }
     var value: Value { lock.withLock { stored } }
     func withValue(_ body: (inout Value) -> Void) { lock.withLock { body(&stored) } }
-}
-
-private func makeSupervisorTreeOwnerWritable(_ url: URL) {
-    var info = stat()
-    guard lstat(url.path, &info) == 0 else { return }
-    if (info.st_mode & S_IFMT) == S_IFDIR {
-        _ = chmod(url.path, 0o700)
-        if let children = try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) {
-            for child in children { makeSupervisorTreeOwnerWritable(child) }
-        }
-    } else if (info.st_mode & S_IFMT) == S_IFREG {
-        _ = chmod(url.path, 0o600)
-    }
 }
 
 private extension NSLock {

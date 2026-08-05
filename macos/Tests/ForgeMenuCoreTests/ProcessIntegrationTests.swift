@@ -3,119 +3,7 @@ import Foundation
 import XCTest
 @testable import ForgeMenuCore
 
-private struct PermissiveRuntimeIdentityValidator: InstalledRuntimeIdentityValidating {
-    func validate(_ runtime: InstalledRuntime) throws {}
-}
-
-private struct RejectingRuntimeIdentityValidator: InstalledRuntimeIdentityValidating {
-    func validate(_ runtime: InstalledRuntime) throws {
-        throw RuntimeInstallerError.untrustedStoreItem("identity changed")
-    }
-}
-
 final class ProcessIntegrationTests: XCTestCase {
-    func testProcessHostAcceptsSafeSelfReplacementAtAdjacentLaunchValidation() async throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'original-must-not-run\\n'\nsleep 30\n")
-        defer { fixture.remove() }
-        let originalIdentity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
-        let runtime = InstalledRuntime(
-            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
-            architecture: .native,
-            executableURL: fixture.scriptURL,
-            executableIdentity: originalIdentity
-        )
-        let replacement = fixture.directory.appendingPathComponent("replacement")
-        try Data("#!/bin/sh\nprintf 'self-replaced-runtime\\n'\nsleep 30\n".utf8).write(to: replacement)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
-        let host = ForgeProcessHost(
-            configuration: .init(
-                logURL: fixture.logURL,
-                launchHooks: RuntimePinnedLaunchHooks(beforeFinalIdentityValidation: {
-                    try FileManager.default.removeItem(at: fixture.scriptURL)
-                    try FileManager.default.moveItem(at: replacement, to: fixture.scriptURL)
-                })
-            ),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
-        )
-
-        try await host.start(runtime: runtime, endpoint: LoopbackEndpoint(port: 55_444), generation: 1)
-        try await waitForFile(fixture.logURL, containing: "self-replaced-runtime")
-        XCTAssertNotEqual(try inode(fixture.scriptURL), originalIdentity.inode)
-        await host.stop(gracePeriod: 0.1)
-        let log = try String(contentsOf: fixture.logURL)
-        XCTAssertTrue(log.contains("self-replaced-runtime"))
-        XCTAssertFalse(log.contains("original-must-not-run"))
-    }
-
-    func testProcessHostPinnedParentPreventsAncestorReplacementRedirect() async throws {
-        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let originalDirectory = parent.appendingPathComponent("runtime")
-        let movedDirectory = parent.appendingPathComponent("runtime-pinned")
-        let replacementDirectory = parent.appendingPathComponent("runtime-replacement")
-        try FileManager.default.createDirectory(at: originalDirectory, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: replacementDirectory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: parent) }
-        let originalExecutable = originalDirectory.appendingPathComponent("forge3")
-        let replacementExecutable = replacementDirectory.appendingPathComponent("forge3")
-        let logURL = parent.appendingPathComponent("ancestor.jsonl")
-        try Data("#!/bin/sh\nprintf 'pinned-original\\n'\nsleep 30\n".utf8).write(to: originalExecutable)
-        try Data("#!/bin/sh\nprintf 'redirected-replacement\\n'\nsleep 30\n".utf8).write(to: replacementExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: originalExecutable.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacementExecutable.path)
-        let identity = try RuntimeExecutableIdentityValidator.capture(originalExecutable)
-        let runtime = InstalledRuntime(
-            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
-            architecture: .native,
-            executableURL: originalExecutable,
-            executableIdentity: identity
-        )
-        let host = ForgeProcessHost(
-            configuration: .init(
-                logURL: logURL,
-                launchHooks: RuntimePinnedLaunchHooks(beforeFinalIdentityValidation: {
-                    try FileManager.default.moveItem(at: originalDirectory, to: movedDirectory)
-                    try FileManager.default.moveItem(at: replacementDirectory, to: originalDirectory)
-                })
-            ),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
-        )
-
-        try await host.start(runtime: runtime, endpoint: LoopbackEndpoint(port: 55_445), generation: 1)
-        try await waitForFile(logURL, containing: "pinned-original")
-        await host.stop(gracePeriod: 0.1)
-        let log = try String(contentsOf: logURL)
-        XCTAssertTrue(log.contains("pinned-original"))
-        XCTAssertFalse(log.contains("redirected-replacement"))
-    }
-
-    func testProcessHostRetainsSharedStoreLeaseUntilServiceIsReaped() async throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'lease-ready\\n'\nsleep 30\n")
-        defer { fixture.remove() }
-        let runtimeRoot = fixture.directory.appendingPathComponent("runtime-store")
-        let lease = RuntimeStoreLease(rootURL: runtimeRoot)
-        let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator(),
-            lease: lease
-        )
-
-        try await host.start(runtime: fixture.runtime, endpoint: LoopbackEndpoint(port: 55_446), generation: 1)
-        try await waitForFile(fixture.logURL, containing: "lease-ready")
-        let exclusiveTask = Task.detached { try lease.acquire(.exclusiveMutation) }
-        try await Task.sleep(nanoseconds: 100_000_000)
-        let probeDescriptor = open(lease.lockURL.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
-        XCTAssertGreaterThanOrEqual(probeDescriptor, 0)
-        if probeDescriptor >= 0 {
-            XCTAssertEqual(flock(probeDescriptor, LOCK_EX | LOCK_NB), -1)
-            XCTAssertEqual(errno, EWOULDBLOCK)
-            close(probeDescriptor)
-        }
-
-        await host.stop(gracePeriod: 0.1)
-        let exclusive = try await exclusiveTask.value
-        exclusive.release()
-    }
-
     func testProcessHostUsesExactArgumentsEnvironmentAndRedactedLog() async throws {
         let fixture = try ProcessFixture(script: #"""
         #!/bin/sh
@@ -127,8 +15,7 @@ final class ProcessIntegrationTests: XCTestCase {
         """#)
         defer { fixture.remove() }
         let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: fixture.logURL)
         )
         let endpoint = LoopbackEndpoint(port: 55_432)
 
@@ -152,8 +39,7 @@ final class ProcessIntegrationTests: XCTestCase {
         defer { first.remove(); second.remove() }
         let logURL = first.directory.appendingPathComponent("selected-runtime.jsonl")
         let host = ForgeProcessHost(
-            configuration: .init(logURL: logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: logURL)
         )
 
         try await host.start(
@@ -192,8 +78,7 @@ final class ProcessIntegrationTests: XCTestCase {
             configuration: .init(
                 logURL: fixture.logURL,
                 maximumBufferedOutputBytes: 4_096
-            ),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            )
         )
 
         try await host.start(
@@ -213,8 +98,7 @@ final class ProcessIntegrationTests: XCTestCase {
         let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'ready\\n'\nsleep 30\n")
         defer { fixture.remove() }
         let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: fixture.logURL)
         )
         try await host.start(
             runtime: fixture.runtime,
@@ -236,97 +120,24 @@ final class ProcessIntegrationTests: XCTestCase {
         await host.stop(gracePeriod: 0.1)
     }
 
-    func testProcessHostValidatesRuntimeIdentityBeforeSpawn() async throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'must-not-run\\n'\n")
-        defer { fixture.remove() }
-        let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: RejectingRuntimeIdentityValidator()
-        )
-
-        do {
-            try await host.start(
-                runtime: fixture.runtime,
-                endpoint: LoopbackEndpoint(port: 55_439),
-                generation: 1
-            )
-            XCTFail("identity validation must reject the process")
-        } catch {
-            XCTAssertEqual(error as? RuntimeInstallerError, .untrustedStoreItem("identity changed"))
-        }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.logURL.path))
-    }
-
-    func testDefaultProcessValidatorAcceptsSafeCurrentFileWithoutReceiptIdentity() throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'safe\\n'\n")
-        defer { fixture.remove() }
-        let validator = InstalledRuntimeIdentityValidator()
-        let staleIdentity = try RuntimeExecutableIdentityValidator.capture(fixture.scriptURL)
-        let runtime = InstalledRuntime(
-            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
-            architecture: .arm64,
-            executableURL: fixture.scriptURL,
-            executableIdentity: staleIdentity
-        )
-
-        let replacement = fixture.directory.appendingPathComponent("replacement")
-        try Data("#!/bin/sh\nprintf 'new-content-and-inode\\n'\n".utf8).write(to: replacement)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: replacement.path)
-        try FileManager.default.removeItem(at: fixture.scriptURL)
-        try FileManager.default.moveItem(at: replacement, to: fixture.scriptURL)
-
-        XCTAssertNotEqual(try inode(fixture.scriptURL), staleIdentity.inode)
-        XCTAssertNoThrow(try validator.validate(runtime))
-        XCTAssertNoThrow(try validator.validate(InstalledRuntime(
-            version: runtime.version,
-            architecture: runtime.architecture,
-            executableURL: runtime.executableURL
-        )))
-    }
-
-    func testDefaultProcessValidatorRejectsUnsafeCurrentFiles() throws {
-        let fixture = try ProcessFixture(script: "#!/bin/sh\nprintf 'unsafe\\n'\n")
-        defer { fixture.remove() }
+    func testProcessHostRejectsMissingExecutable() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missing = directory.appendingPathComponent("forge3")
         let runtime = InstalledRuntime(
             version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
             architecture: .native,
-            executableURL: fixture.scriptURL
+            executableURL: missing
         )
-        let validator = InstalledRuntimeIdentityValidator()
-
-        let symlink = fixture.directory.appendingPathComponent("forge3-symlink")
-        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: fixture.scriptURL)
-        XCTAssertThrowsError(try validator.validate(InstalledRuntime(
-            version: runtime.version,
-            architecture: runtime.architecture,
-            executableURL: symlink
-        )))
-
-        let linkedDirectory = fixture.directory.appendingPathComponent("runtime-link")
-        let realDirectory = fixture.directory.appendingPathComponent("runtime-real")
-        try FileManager.default.createDirectory(at: realDirectory, withIntermediateDirectories: false)
-        let linkedExecutable = realDirectory.appendingPathComponent("forge3")
-        try Data("#!/bin/sh\nprintf 'linked\\n'\n".utf8).write(to: linkedExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: linkedExecutable.path)
-        try FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: realDirectory)
-        XCTAssertThrowsError(try validator.validate(InstalledRuntime(
-            version: runtime.version,
-            architecture: runtime.architecture,
-            executableURL: linkedDirectory.appendingPathComponent("forge3")
-        )))
-
-        let hardlink = fixture.directory.appendingPathComponent("forge3-hardlink")
-        try FileManager.default.linkItem(at: fixture.scriptURL, to: hardlink)
-        XCTAssertThrowsError(try validator.validate(runtime))
-        try FileManager.default.removeItem(at: hardlink)
-
-        XCTAssertThrowsError(
-            try InstalledRuntimeIdentityValidator(expectedUserID: geteuid() &+ 1).validate(runtime)
+        let host = ForgeProcessHost(
+            configuration: .init(logURL: directory.appendingPathComponent("forge3.jsonl"))
         )
-
-        for mode in [0o720, 0o702, 0o600] {
-            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: fixture.scriptURL.path)
-            XCTAssertThrowsError(try validator.validate(runtime), "mode \(String(mode, radix: 8))")
+        do {
+            try await host.start(runtime: runtime, endpoint: LoopbackEndpoint(port: 55_439), generation: 1)
+            XCTFail("starting a missing executable must fail")
+        } catch {
+            XCTAssertEqual(error as? ForgeCoreError, .missingExecutable(missing.standardizedFileURL.path))
         }
     }
 
@@ -342,8 +153,7 @@ final class ProcessIntegrationTests: XCTestCase {
         """#)
         defer { fixture.remove() }
         let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: fixture.logURL)
         )
         try await host.start(
             runtime: fixture.runtime,
@@ -360,8 +170,7 @@ final class ProcessIntegrationTests: XCTestCase {
         defer { first.remove(); second.remove() }
         let logURL = first.directory.appendingPathComponent("stale-timer.jsonl")
         let host = ForgeProcessHost(
-            configuration: .init(logURL: logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: logURL)
         )
         try await host.start(runtime: first.runtime, endpoint: LoopbackEndpoint(port: 55_441), generation: 1)
         try await waitForFile(logURL, containing: "first-ready")
@@ -390,8 +199,7 @@ final class ProcessIntegrationTests: XCTestCase {
         """#)
         defer { fixture.remove() }
         let host = ForgeProcessHost(
-            configuration: .init(logURL: fixture.logURL),
-            runtimeIdentityValidator: PermissiveRuntimeIdentityValidator()
+            configuration: .init(logURL: fixture.logURL)
         )
 
         try await host.start(
@@ -403,6 +211,50 @@ final class ProcessIntegrationTests: XCTestCase {
         let started = Date()
         await host.stop(gracePeriod: 0.1)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+    }
+
+    func testProcessHostKillsWholeProcessGroupLeavingNoOrphans() async throws {
+        // The child spawns a grandchild in the same process group that ignores
+        // SIGTERM. Group-kill on stop() must reap the descendant too, and the
+        // stop must still return within the grace bound.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let scriptURL = directory.appendingPathComponent("forge3")
+        let logURL = directory.appendingPathComponent("forge3.jsonl")
+        let markerURL = directory.appendingPathComponent("grandchild.marker")
+        let script = """
+        #!/bin/sh
+        (
+          trap '' TERM
+          printf 'gc\\n' > \(markerURL.path)
+          while :; do sleep 1; done
+        ) &
+        printf 'parent-ready\\n'
+        wait
+        """
+        try Data(script.utf8).write(to: scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureRuntime = InstalledRuntime(
+            version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
+            architecture: .native,
+            executableURL: scriptURL
+        )
+
+        let host = ForgeProcessHost(
+            configuration: .init(logURL: logURL)
+        )
+        try await host.start(runtime: fixtureRuntime, endpoint: LoopbackEndpoint(port: 55_450), generation: 1)
+        try await waitForFile(logURL, containing: "parent-ready")
+        // Wait for the grandchild to record its presence.
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: markerURL.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL.path))
+        let started = Date()
+        await host.stop(gracePeriod: 0.2)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
     }
 
     func testRuntimePathsCanResolveLogsBeforeRuntimeExists() throws {
@@ -430,14 +282,6 @@ final class ProcessIntegrationTests: XCTestCase {
     }
 }
 
-private func inode(_ url: URL) throws -> UInt64 {
-    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-    guard let value = attributes[.systemFileNumber] as? NSNumber else {
-        throw RuntimeInstallerError.processFailure("could not read runtime inode")
-    }
-    return value.uint64Value
-}
-
 private struct ProcessFixture {
     let directory: URL
     let scriptURL: URL
@@ -446,8 +290,7 @@ private struct ProcessFixture {
         InstalledRuntime(
             version: RuntimeReleaseVersion(rawValue: "1.2.3")!,
             architecture: .native,
-            executableURL: scriptURL,
-            executableIdentity: try? RuntimeExecutableIdentityValidator.capture(scriptURL)
+            executableURL: scriptURL
         )
     }
 

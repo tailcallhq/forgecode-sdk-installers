@@ -220,7 +220,7 @@ public actor ServiceSupervisor {
                 )
             }
         case .failure(let error):
-            if error is CancellationError || error as? RuntimeInstallerError == .cancelled { return }
+            if error is CancellationError || error as? ThinInstallerError == .cancelled { return }
             guard lifecycleIsCurrent(expectedGeneration) else { return }
             client = nil
             snapshot.endpoint = nil
@@ -532,27 +532,12 @@ public actor ServiceSupervisor {
 
     private func installationFailure(_ error: Error) -> RuntimeInstallationFailure {
         switch error {
-        case RuntimeInstallerError.network,
-             RuntimeInstallerError.networkTimeout,
-             RuntimeInstallerError.invalidHTTPStatus,
-             RuntimeInstallerError.missingContentLength,
-             RuntimeInstallerError.invalidContentLength,
-             RuntimeInstallerError.responseTooLarge,
-             RuntimeInstallerError.tooManyRedirects,
-             RuntimeInstallerError.unsafeRedirect:
+        case ThinInstallerError.download:
             return .download
-        case RuntimeInstallerError.checksumMismatch,
-             RuntimeInstallerError.invalidChecksumSidecar,
-             RuntimeInstallerError.invalidManifest,
-             RuntimeInstallerError.malformedArchive,
-             RuntimeInstallerError.unsafeArchiveEntry,
-             RuntimeInstallerError.archiveLimitExceeded,
-             RuntimeInstallerError.missingRuntimeExecutable,
-             RuntimeInstallerError.duplicateRuntimeExecutable,
-             RuntimeInstallerError.invalidMachO,
-             RuntimeInstallerError.wrongArchitecture:
+        case ThinInstallerError.installerFailed,
+             ThinInstallerError.missingExecutable:
             return .verification
-        case RuntimeInstallerError.filesystem(_, _, let failure):
+        case ThinInstallerError.filesystem(_, _, let failure):
             return .filesystem(failure)
         default:
             return .other
