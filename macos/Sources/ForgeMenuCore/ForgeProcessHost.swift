@@ -14,19 +14,22 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         public let maximumLogBytes: UInt64
         public let retainedLogFiles: Int
         public let maximumBufferedOutputBytes: Int
+        public let guardianExecutableURL: URL
 
         public init(
             environment: [String: String] = [:],
             logURL: URL,
             maximumLogBytes: UInt64 = 5_000_000,
             retainedLogFiles: Int = 3,
-            maximumBufferedOutputBytes: Int = 256_000
+            maximumBufferedOutputBytes: Int = 256_000,
+            guardianExecutableURL: URL = ForgeGuardian.currentExecutableURL()
         ) {
             self.environment = environment
             self.logURL = logURL
             self.maximumLogBytes = maximumLogBytes
             self.retainedLogFiles = retainedLogFiles
             self.maximumBufferedOutputBytes = max(4_096, maximumBufferedOutputBytes)
+            self.guardianExecutableURL = guardianExecutableURL
         }
     }
 
@@ -50,6 +53,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
     private var processSource: DispatchSourceProcess?
     private var outputSource: DispatchSourceRead?
     private var outputDescriptor: Int32 = -1
+    private var guardianDeathWriteDescriptor: Int32 = -1
     private var outputBuffer = Data()
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -93,7 +97,8 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
                 self.stopping = true
                 let expectedPID = self.pid
                 let expectedToken = self.lifecycleToken
-                self.logger.info("Stopping forge3 process group \(expectedPID)")
+                self.logger.info("Stopping forge3 guardian process group \(expectedPID)")
+                self.closeGuardianDeathPipeLocked()
                 _ = kill(-expectedPID, SIGTERM)
 
                 let escalation = DispatchWorkItem { [weak self] in
@@ -124,16 +129,33 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             throw ForgeCoreError.missingExecutable(selectedExecutable.path)
         }
 
-        var descriptors = [Int32](repeating: 0, count: 2)
-        guard pipe(&descriptors) == 0 else {
+        let guardianExecutable = configuration.guardianExecutableURL.standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: guardianExecutable.path) else {
+            throw ForgeCoreError.missingExecutable(guardianExecutable.path)
+        }
+
+        var loggingDescriptors = [Int32](repeating: 0, count: 2)
+        guard pipe(&loggingDescriptors) == 0 else {
             throw ForgeCoreError.processLaunch("could not create logging pipe: \(String(cString: strerror(errno)))")
         }
-        var readDescriptor = descriptors[0]
-        var writeDescriptor = descriptors[1]
+        var readDescriptor = loggingDescriptors[0]
+        var writeDescriptor = loggingDescriptors[1]
+        var deathDescriptors = [Int32](repeating: 0, count: 2)
+        guard pipe(&deathDescriptors) == 0 else {
+            close(readDescriptor)
+            close(writeDescriptor)
+            throw ForgeCoreError.processLaunch("could not create guardian death pipe: \(String(cString: strerror(errno)))")
+        }
+        var deathReadDescriptor = deathDescriptors[0]
+        var deathWriteDescriptor = deathDescriptors[1]
         defer {
             if readDescriptor >= 0 { close(readDescriptor) }
             if writeDescriptor >= 0 { close(writeDescriptor) }
+            if deathReadDescriptor >= 0 { close(deathReadDescriptor) }
+            if deathWriteDescriptor >= 0 { close(deathWriteDescriptor) }
         }
+        try setCloseOnExec(deathReadDescriptor)
+        try setCloseOnExec(deathWriteDescriptor)
         var actions: posix_spawn_file_actions_t?
         guard posix_spawn_file_actions_init(&actions) == 0 else {
             throw ForgeCoreError.processLaunch("could not initialize process file actions")
@@ -159,6 +181,24 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
             posix_spawn_file_actions_addclose(&actions, writeDescriptor),
             operation: "close child logging output"
         )
+        try checkPOSIX(
+            posix_spawn_file_actions_addclose(&actions, deathWriteDescriptor),
+            operation: "close guardian death-pipe output"
+        )
+        try checkPOSIX(
+            posix_spawn_file_actions_adddup2(
+                &actions,
+                deathReadDescriptor,
+                ForgeGuardian.deathDescriptor
+            ),
+            operation: "install guardian death descriptor"
+        )
+        if deathReadDescriptor != ForgeGuardian.deathDescriptor {
+            try checkPOSIX(
+                posix_spawn_file_actions_addclose(&actions, deathReadDescriptor),
+                operation: "close original guardian death-pipe input"
+            )
+        }
 
         var attributes: posix_spawnattr_t?
         guard posix_spawnattr_init(&attributes) == 0 else {
@@ -166,8 +206,11 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
         defer { posix_spawnattr_destroy(&attributes) }
         try checkPOSIX(
-            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)),
-            operation: "enable process-group creation"
+            posix_spawnattr_setflags(
+                &attributes,
+                Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+            ),
+            operation: "enable process-group creation and close-on-exec defaults"
         )
         try checkPOSIX(
             posix_spawnattr_setpgroup(&attributes, 0),
@@ -175,7 +218,9 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         )
 
         let arguments = [
-            selectedExecutable.lastPathComponent,
+            guardianExecutable.lastPathComponent,
+            ForgeGuardian.argumentMarker,
+            selectedExecutable.path,
             "--log-format", "json",
             "ws", "--addr", endpoint.address
         ]
@@ -196,7 +241,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         var spawnedPID: pid_t = 0
         let result = posix_spawn(
             &spawnedPID,
-            selectedExecutable.path,
+            guardianExecutable.path,
             &actions,
             &attributes,
             &argv,
@@ -204,11 +249,15 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         )
         close(writeDescriptor)
         writeDescriptor = -1
+        close(deathReadDescriptor)
+        deathReadDescriptor = -1
         guard result == 0 else {
             throw ForgeCoreError.processLaunch(String(cString: strerror(result)))
         }
 
         pid = spawnedPID
+        guardianDeathWriteDescriptor = deathWriteDescriptor
+        deathWriteDescriptor = -1
         startedAt = Date()
         lifecycleGeneration = generation
         nextLifecycleToken &+= 1
@@ -226,7 +275,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         }
         processSource = source
         source.resume()
-        logger.info("Started forge3 process group \(spawnedPID) from \(selectedExecutable.path) on private loopback port \(endpoint.port)")
+        logger.info("Started forge3 guardian process group \(spawnedPID) for \(selectedExecutable.path) on private loopback port \(endpoint.port)")
     }
 
     private func beginReadingOutputLocked(descriptor: Int32) {
@@ -325,6 +374,7 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         outputSource = nil
         outputDescriptor = -1
         flushRemainingOutputLocked()
+        closeGuardianDeathPipeLocked()
         pid = 0
         startedAt = nil
         lifecycleGeneration = 0
@@ -341,6 +391,21 @@ public final class ForgeProcessHost: ForgeProcessHosting, @unchecked Sendable {
         let waiters = stopWaiters
         stopWaiters.removeAll()
         waiters.forEach { $0.resume() }
+    }
+
+    private func closeGuardianDeathPipeLocked() {
+        guard guardianDeathWriteDescriptor >= 0 else { return }
+        close(guardianDeathWriteDescriptor)
+        guardianDeathWriteDescriptor = -1
+    }
+
+    private func setCloseOnExec(_ descriptor: Int32) throws {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags >= 0, fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+            throw ForgeCoreError.processLaunch(
+                "could not mark guardian pipe close-on-exec: \(String(cString: strerror(errno)))"
+            )
+        }
     }
 
     private func checkPOSIX(_ result: Int32, operation: String) throws {
