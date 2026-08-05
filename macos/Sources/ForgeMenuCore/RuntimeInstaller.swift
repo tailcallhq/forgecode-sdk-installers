@@ -15,11 +15,13 @@ public protocol RuntimeInstalling: Sendable {
 ///
 /// First run downloads the installer script from `installerURL` (default
 /// `https://install.forgecode.dev/server`) and runs it via `/bin/sh` with
-/// `FORGE3_INSTALL_DIR` pinned to a deterministic directory. The binary lands
-/// at `<installDir>/bin/forge3` (cargo-home layout) and a receipt is written to
-/// `~/.config/forge3/forge3-receipt.json` so forge3's own axoupdater self-update
-/// keeps working. No checksum, signature, or Mach-O verification is performed —
-/// the installer script is fully trusted.
+/// `FORGE3_INSTALL_DIR` pinned to the cargo home (`$CARGO_HOME`, falling back
+/// to `~/.cargo`) — the same directory the script installs to by default and
+/// the same one forge3's own self-update always writes back to. The binary
+/// lands at `<installDir>/bin/forge3` and a receipt is written to
+/// `~/.config/forge3/forge3-receipt.json` so forge3's self-update keeps
+/// working. No checksum, signature, or Mach-O verification is performed — the
+/// installer script is fully trusted.
 public actor RuntimeInstaller: RuntimeInstalling {
     /// Overrides the installer script source. `FORGE_UPDATE_INSTALLER_URL=...`
     /// (e.g. `http://127.0.0.1:9877/install.sh`) points the app at a local
@@ -52,13 +54,21 @@ public actor RuntimeInstaller: RuntimeInstalling {
         self.maximumScriptBytes = maximumScriptBytes
     }
 
-    /// Deterministic install directory: `~/Library/Application Support/ForgeCode/forge3`.
+    /// The install directory the upstream installer script targets by default:
+    /// `$CARGO_HOME`, falling back to `~/.cargo`. forge3's self-update installs
+    /// back into the same directory, so the app and the runtime always agree on
+    /// where the binary lives (`<cargo home>/bin/forge3`).
     public static func defaultInstallDir(
-        libraryDirectory: URL? = nil,
-        fileManager: FileManager = .default
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL? = nil
     ) -> URL {
-        let library = libraryDirectory ?? fileManager.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-        return library.appendingPathComponent("Application Support/ForgeCode/forge3", isDirectory: true)
+        if let cargoHome = environment["CARGO_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cargoHome.isEmpty {
+            return URL(fileURLWithPath: (cargoHome as NSString).expandingTildeInPath, isDirectory: true)
+                .standardizedFileURL
+        }
+        let home = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".cargo", isDirectory: true).standardizedFileURL
     }
 
     /// The absolute path the installed executable is expected at.

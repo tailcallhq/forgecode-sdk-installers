@@ -31,7 +31,7 @@ final class ThinInstallerTests: XCTestCase {
 
     func testInstallerInvocationUsesShInstallDirNoModifyPathAndQuiet() {
         let scriptURL = URL(fileURLWithPath: "/tmp/forge3-installer/forge3-installer.sh")
-        let installDir = URL(fileURLWithPath: "/Users/test/Library/Application Support/ForgeCode/forge3")
+        let installDir = URL(fileURLWithPath: "/Users/test/.cargo")
         let invocation = RuntimeInstaller.makeInvocation(scriptURL: scriptURL, installDir: installDir)
 
         XCTAssertEqual(invocation.arguments, ["/bin/sh", scriptURL.path])
@@ -63,13 +63,25 @@ final class ThinInstallerTests: XCTestCase {
         XCTAssertEqual(resolved.absoluteString, "http://127.0.0.1:9877/install.sh")
     }
 
-    func testDefaultInstallDirIsUnderApplicationSupport() {
-        let library = URL(fileURLWithPath: "/Users/test/Library")
-        let dir = RuntimeInstaller.defaultInstallDir(libraryDirectory: library)
-        XCTAssertEqual(dir.path, "/Users/test/Library/Application Support/ForgeCode/forge3")
+    func testDefaultInstallDirIsCargoHome() {
+        let home = URL(fileURLWithPath: "/Users/test")
+        let dir = RuntimeInstaller.defaultInstallDir(environment: [:], homeDirectory: home)
+        XCTAssertEqual(dir.path, "/Users/test/.cargo")
         XCTAssertEqual(
             RuntimeInstaller.executableURL(installDir: dir).path,
-            "/Users/test/Library/Application Support/ForgeCode/forge3/bin/forge3"
+            "/Users/test/.cargo/bin/forge3"
+        )
+    }
+
+    func testDefaultInstallDirHonoursCargoHomeEnvironment() {
+        let dir = RuntimeInstaller.defaultInstallDir(
+            environment: ["CARGO_HOME": "/opt/cargo"],
+            homeDirectory: URL(fileURLWithPath: "/Users/test")
+        )
+        XCTAssertEqual(dir.path, "/opt/cargo")
+        XCTAssertEqual(
+            RuntimeInstaller.executableURL(installDir: dir).path,
+            "/opt/cargo/bin/forge3"
         )
     }
 
