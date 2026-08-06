@@ -79,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.target = self
             statusItem.button?.action = #selector(togglePopover(_:))
             statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            // Built once. The image never varies, so rebuilding it on every
+            // snapshot would re-rasterise the bezier path for no visible change.
+            // `statusImage()` already marks it as a template.
+            statusItem.button?.image = ForgeCodeLogo.statusImage()
             updateStatusItem(serviceController.snapshot)
 
             popoverController = PopoverController()
@@ -162,8 +166,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: "ForgeCode")
         if let updaterController {
+            // Kept verbatim in sync with the panel row in MenuRenderer: both invoke
+            // the same Sparkle check, and the label is scoped to the app so it is
+            // not read as covering the separately-updated server runtime.
             let checkForUpdates = NSMenuItem(
-                title: "Check for Updates",
+                title: "Update ForgeCode App",
                 action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
                 keyEquivalent: ""
             )
@@ -265,16 +272,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.toggle(relativeTo: sender)
     }
 
+    /// The status icon is deliberately constant: a single template image with no
+    /// tint, so it always matches the menu bar like every other status item.
+    ///
+    /// Phase-derived tinting used to live in `updateStatusItem`, but it made the
+    /// icon visibly change shade during every launch. The first paint happens
+    /// before `serviceController.start()`, when the snapshot still holds its
+    /// default `.stopped` phase, so the icon appeared dimmed
+    /// (`.secondaryLabelColor`), flipped to `.controlAccentColor` while
+    /// installing/starting, then settled untinted at `.ready` — read as the
+    /// logo "changing colour on its own". Phase is still surfaced through the
+    /// tooltip, the accessibility label, and the panel itself.
     private func updateStatusItem(_ snapshot: ServiceSnapshot) {
         guard let button = statusItem.button else { return }
-        switch snapshot.phase {
-        case .ready: button.contentTintColor = nil
-        case .installing, .starting, .restarting: button.contentTintColor = .controlAccentColor
-        case .installationFailed, .failed: button.contentTintColor = .systemOrange
-        case .disabled, .stopped: button.contentTintColor = .secondaryLabelColor
-        }
-        button.image = ForgeCodeLogo.statusImage()
-        button.image?.isTemplate = true
         let presentation = PopoverPresentation.make(snapshot: snapshot)
         let accessibilityStatus = "\(presentation.serviceTitle), \(presentation.serviceDetail)"
         button.setAccessibilityLabel(accessibilityStatus)
