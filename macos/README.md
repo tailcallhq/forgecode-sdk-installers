@@ -4,7 +4,9 @@ A menu-bar-only AppKit application that supervises a local ForgeCode WebSocket s
 
 ## Prerequisites
 
-Building and testing the app needs Xcode 15 or later (Swift 5.9, macOS 13 SDK). Semantic-version parsing and comparison are implemented locally, and the package has no remote dependencies or `Package.resolved` remote pins. Before the first build, vendor the Sparkle updater framework once:
+Building and testing the app needs **Xcode 26 or later** on a macOS 26 host. The app target references macOS 26 SDK symbols (`NSGlassEffectView`, `prefersCompactControlSizeMetrics`) behind `if #available(macOS 26.0, *)` checks, so it does not compile against an older SDK, and `swift test` builds every target including the app. The runtime deployment target is unchanged at macOS 13: those symbols are weak-linked and the app falls back to `NSVisualEffectView` on macOS 13-15. See `docs/liquid-glass-adoption.md`.
+
+Semantic-version parsing and comparison are implemented locally, and the package has no remote dependencies or `Package.resolved` remote pins. Before the first build, vendor the Sparkle updater framework once:
 
 ```sh
 tools/fetch-sparkle.sh
@@ -60,6 +62,12 @@ The popover contains:
 The body shows the commands directly: Launch at Login and its approval path, error details when present, and Quit. Nothing is hidden behind an overflow button. Opening the frontend lives solely in the header **Open** button.
 
 The service is not a user-facing toggle. It starts with the app and stops when the app quits, so there is no Run or Restart command; quitting and reopening ForgeCode restarts it.
+
+### Panel material
+
+The panel's backdrop is selected at runtime. On macOS 26 it is Liquid Glass (`NSGlassEffectView`, `.regular` style), matching the system's own menu bar popovers; on macOS 13-15 it is the previous `NSVisualEffectView` `.menu` material. Corner radius, the row hover highlight, and control-size metrics follow the active backend. `MenuBackdrop` owns that choice, and `docs/liquid-glass-adoption.md` records why.
+
+Because the effect depends on what is behind the window, it cannot be reviewed from source or from the unit tests; it has to be seen running on each OS.
 
 ### Console origin
 
