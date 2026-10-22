@@ -24,7 +24,8 @@ jobs:
   changes:
     name: Detect macOS Changes
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on:
+      - sccache
     timeout-minutes: 5
     permissions:
       contents: read
@@ -47,7 +48,8 @@ jobs:
   draft_release:
     name: Draft Release
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on:
+      - sccache
     timeout-minutes: 5
     permissions:
       contents: write
